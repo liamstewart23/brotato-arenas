@@ -1,3 +1,5 @@
+<img width="500" height="500" alt="arenas_logo_mod" src="https://github.com/user-attachments/assets/92571d54-9a64-4b8a-8a32-bd6cab83e63e" />
+
 # Brotato - Arenas Mod
 
 A mod for the game [Brotato](https://store.steampowered.com/app/1942280/Brotato/) that adds new arena shapes you can pick from the run options menu. Each one changes the arena layout and how waves play out.
