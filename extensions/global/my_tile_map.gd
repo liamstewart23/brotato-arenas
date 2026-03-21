@@ -126,6 +126,7 @@ func init(zone: ZoneData) -> void:
 	if sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM:
 		.init(zone)
 		_create_internal_wall_visuals(shape, zone)
+		_create_outside_wall_fill(zone)
 		_create_projectile_wall_colliders(shape)
 		_nav_shape = shape
 		_create_navigation(shape, zone)
@@ -736,20 +737,26 @@ var _player_last_hazard_hit: Dictionary = {}  # player instance_id -> OS.get_tic
 # --- MAZE / MULTIROOM wall visuals and projectile colliders ---
 
 # Replace floor tiles with colored wall rectangles for maze/multiroom internal walls.
-# Uses a darkened version of the zone's outline color for visual consistency.
+# Cave walls use the outline's color to match the jagged edge border sprites.
+# Maze walls use a darker variant.
 func _create_internal_wall_visuals(shape, zone: ZoneData) -> void:
 	var ts = Utils.TILE_SIZE
+	var is_cave = shape.get_shape_id() == ArenaShapeClass.SHAPE_MULTIROOM
+
 	var wall_color = Color(0.2, 0.18, 0.15, 1.0)
-	# Use outline color if available for DLC matching
 	if outline and outline.modulate:
-		wall_color = Color(outline.modulate.r * 0.5, outline.modulate.g * 0.5, outline.modulate.b * 0.5, 1.0)
+		if is_cave:
+			# Cave: match the outline border color so walls blend with edge sprites
+			var c = outline.modulate
+			wall_color = Color(c.r * 0.4, c.g * 0.4, c.b * 0.4, 1.0)
+		else:
+			wall_color = Color(outline.modulate.r * 0.5, outline.modulate.g * 0.5, outline.modulate.b * 0.5, 1.0)
 
 	for i in zone.width:
 		for j in zone.height:
 			if not shape.should_fill_tile(i, j, ts):
-				# Remove the floor tile
+				# Remove the floor tile and draw a solid colored rectangle
 				set_cell(i, j, -1)
-				# Draw a solid colored rectangle using TileMap's coordinate mapping
 				var wall_rect = Polygon2D.new()
 				var pos = map_to_world(Vector2(i, j)) - Vector2(ts, ts)
 				wall_rect.polygon = PoolVector2Array([
@@ -759,6 +766,55 @@ func _create_internal_wall_visuals(shape, zone: ZoneData) -> void:
 				wall_rect.color = wall_color
 				wall_rect.z_index = 10
 				add_child(wall_rect)
+
+
+
+# Fill the area outside the tile grid with colored rectangles so no empty space
+# is visible beyond the arena. Uses the cave wall color to blend seamlessly.
+# Covers a generous border (4 tiles) around all four sides of the grid.
+func _create_outside_wall_fill(zone: ZoneData) -> void:
+	var ts = Utils.TILE_SIZE
+	var fill_color = Color(0.2, 0.18, 0.15, 1.0)
+	if outline and outline.modulate:
+		var c = outline.modulate
+		fill_color = Color(c.r * 0.4, c.g * 0.4, c.b * 0.4, 1.0)
+
+	var border = 4  # tiles of fill beyond the grid edge
+	var w = zone.width
+	var h = zone.height
+
+	# Draw one large rectangle per side (top, bottom, left, right) plus corners
+	var rects = [
+		# Top strip (including corners)
+		Vector2(-border, -border), Vector2(w + border, 0),
+		# Bottom strip (including corners)
+		Vector2(-border, h), Vector2(w + border, h + border),
+		# Left strip (between top and bottom)
+		Vector2(-border, 0), Vector2(0, h),
+		# Right strip (between top and bottom)
+		Vector2(w, 0), Vector2(w + border, h),
+	]
+
+	for idx in range(0, rects.size(), 2):
+		var from_tile = rects[idx]
+		var to_tile = rects[idx + 1]
+		var pixel_from = Vector2(from_tile.x * ts, from_tile.y * ts)
+		var pixel_to = Vector2(to_tile.x * ts, to_tile.y * ts)
+		# Use map_to_world offset to match tilemap positioning
+		var offset = map_to_world(Vector2.ZERO) - Vector2(ts, ts)
+		pixel_from += offset
+		pixel_to += offset
+
+		var fill_rect = Polygon2D.new()
+		fill_rect.polygon = PoolVector2Array([
+			pixel_from,
+			Vector2(pixel_to.x, pixel_from.y),
+			pixel_to,
+			Vector2(pixel_from.x, pixel_to.y)
+		])
+		fill_rect.color = fill_color
+		fill_rect.z_index = 10
+		add_child(fill_rect)
 
 
 # Create an Area2D with collision shapes matching wall tiles that destroys
