@@ -1,6 +1,6 @@
-# Arenas - 8 Arena Shapes
+# Brotato - Arenas Mod
 
-Brotato mod that adds new arena shapes you can pick from the run options menu. Each one changes the arena layout and how waves play out.
+A mod for the game [Brotato](https://store.steampowered.com/app/1942280/Brotato/) that adds new arena shapes you can pick from the run options menu. Each one changes the arena layout and how waves play out.
 
 ## Shapes
 
