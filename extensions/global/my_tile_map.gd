@@ -1,10 +1,31 @@
+# my_tile_map.gd — Master extension for tile fill, visuals, damage, and navigation.
+#
+# This is the largest file in the mod. It handles everything that happens ON
+# the tile map for all 8 arena shapes. Organized into these major systems:
+#
+#   INIT: Shape-specific tile fill and outline creation (init, _create_shape_outline)
+#
+#   SHRINKING (Closing Storm): Morphing fog overlay with layered sine-wave wobble,
+#     600 fire emitters along the boundary, entry + tick damage with escalation.
+#
+#   CURSE RUN (Treadmill): Scrolling stripe shader, death wall with organic morph,
+#     fog overlay left of wall, fire emitters, treadmill drift, instant-kill zone.
+#
+#   HAZARD ZONES: Animated circle overlays with sine-wave morphing, fire particle
+#     emitters per zone, entry + tick damage with escalation.
+#
+#   MAZE / MULTIROOM: Internal wall visuals (colored rectangles), projectile-blocking
+#     Area2D, AStar2D navigation graph for enemies and pets with anti-stuck detection.
+#
+# The _physics_process dispatches to the active system based on shape ID.
+
 extends "res://global/my_tile_map.gd"
 
 const ArenaShapeClass = preload("res://mods-unpacked/PapiLeem-Arenas/arena_shapes/arena_shape.gd")
 
 var _arena_outline_node: Node2D = null
 
-# Shrinking visuals
+# --- SHRINKING (Closing Storm) visuals ---
 var _shrinking_outline_node: Node2D = null
 var _shrinking_line: Line2D = null
 var _fire_emitters: Array = []
@@ -28,7 +49,7 @@ const SHRINKING_DAMAGE_BASE := 0.20
 const SHRINKING_DAMAGE_ESCALATED := 0.30
 const SHRINKING_ESCALATION_WINDOW := 2.0
 
-# Scroller death wall visuals
+# --- CURSE RUN (Treadmill) death wall visuals ---
 var _scroller_wall_node: Node2D = null
 var _scroller_wall_line: Line2D = null
 var _scroller_wall_fog: Polygon2D = null
@@ -48,7 +69,7 @@ var _scroller_wall_y_end: float = 0.0
 var _treadmill_shader_mat: ShaderMaterial = null
 var _treadmill_scroll_offset: float = 0.0
 
-# Navigation for maze/multiroom
+# --- MAZE / MULTIROOM navigation (AStar2D pathfinding) ---
 var _astar: AStar2D = null
 var _astar_tile_w: int = 0
 var _nav_shape = null
@@ -74,6 +95,12 @@ var _pet_last_target: Dictionary = {}   # track target changes for immediate rec
 var _pet_nav_update_timer: float = 0.0
 
 
+# Override init to handle shape-specific tile fill and visual setup.
+# Routes to different strategies based on shape type:
+#   - Rectangle/null, shrinking, hazard: vanilla tile fill + optional overlays
+#   - Curse Run: vanilla tiles + death wall + treadmill shader
+#   - Maze/MultiRoom: vanilla tiles + wall visuals + projectile colliders + AStar nav
+#   - Circle/Hexagon: custom per-tile fill based on shape.should_fill_tile() + outline
 func init(zone: ZoneData) -> void:
 	var shape = ZoneService.arena_shape
 
@@ -119,6 +146,11 @@ func init(zone: ZoneData) -> void:
 	_create_shape_outline(shape)
 
 
+# Per-frame update dispatcher. Routes to the active shape's system:
+#   - Shrinking: update scale -> morph outline -> update fog -> apply damage
+#   - Curse Run: update drift -> scroll shader -> morph wall -> apply kill zone
+#   - Hazard: animate ring overlays -> apply zone damage
+#   - Maze/MultiRoom: steer enemies and pets along AStar paths
 func _physics_process(delta: float) -> void:
 	var shape = ZoneService.arena_shape
 	if shape == null:
@@ -166,6 +198,8 @@ func _physics_process(delta: float) -> void:
 		_steer_pets_along_paths(delta, shape)
 
 
+# Create a Line2D visual outline for circle/hexagon shapes.
+# Uses the shape's outline points and the zone's outline color.
 func _create_shape_outline(shape) -> void:
 	var pts = shape.get_outline_points()
 	if pts.size() < 3:
@@ -181,6 +215,9 @@ func _create_shape_outline(shape) -> void:
 	_arena_outline_node.add_child(line)
 
 
+# Create a scrolling stripe shader on the tile map for Curse Run's treadmill effect.
+# The shader draws faint diagonal stripes that scroll left at the drift speed,
+# giving a visual cue that the ground is moving.
 func _create_treadmill_scroll(shape) -> void:
 	var shader = Shader.new()
 	shader.code = """shader_type canvas_item;
@@ -210,6 +247,7 @@ void fragment() {
 	self.material = _treadmill_shader_mat
 
 
+# Advance the treadmill shader's scroll offset by drift_speed * delta
 func _update_treadmill_scroll(shape, delta: float) -> void:
 	if _treadmill_shader_mat == null:
 		return
@@ -217,6 +255,9 @@ func _update_treadmill_scroll(shape, delta: float) -> void:
 	_treadmill_shader_mat.set_shader_param("scroll_offset", _treadmill_scroll_offset)
 
 
+# Create the Curse Run death wall: a thick glowing line, fog overlay to its left,
+# and fire emitters distributed along the wall. The wall morphs organically
+# using layered sine waves (see _get_scroller_morph_offset).
 func _create_scroller_wall(shape) -> void:
 	_scroller_wall_node = Node2D.new()
 	_scroller_wall_node.z_index = 15
@@ -271,6 +312,9 @@ func _create_scroller_wall(shape) -> void:
 		_scroller_fire_emitters.append(emitter)
 
 
+# Layered sine waves producing organic smoky wobble along the death wall.
+# Multiple frequencies and speeds create an unpredictable, alive-looking edge.
+# Returns a value roughly in [-1.2, 1.2] that's scaled by SCROLLER_MORPH_AMOUNT.
 func _get_scroller_morph_offset(t: float) -> float:
 	var offset = sin(t * 3.0 + _scroller_morph_time * 2.3) * 0.4
 	offset += sin(t * 5.0 - _scroller_morph_time * 1.7) * 0.3
@@ -279,6 +323,9 @@ func _get_scroller_morph_offset(t: float) -> float:
 	return offset
 
 
+# Push all alive players leftward at the current drift speed.
+# Also reduces player speed to 65% of max to make the treadmill feel challenging
+# without being impossible. Uses max_stats to avoid compounding each frame.
 func _apply_treadmill_drift(shape, delta: float) -> void:
 	var main = Utils.get_scene_node()
 	if main == null:
@@ -297,6 +344,8 @@ func _apply_treadmill_drift(shape, delta: float) -> void:
 		player.global_position.x -= shape.drift_speed * delta
 
 
+# Update the death wall's morphing position, fog polygon, and fire emitters.
+# The wall is a vertical line at x=160 with organic wobble applied per-segment.
 func _update_scroller_wall(shape) -> void:
 	if _scroller_wall_node == null:
 		return
@@ -343,6 +392,8 @@ func _update_scroller_wall(shape) -> void:
 			_scroller_fire_emitters[i].emitting = false
 
 
+# Interpolate the death wall's X position at a given Y coordinate.
+# Used to determine if a player is left of the wall (= instant death).
 func _get_wall_x_at_y(py: float) -> float:
 	var pts = _scroller_wall_points
 	if pts.size() < 2:
@@ -360,6 +411,8 @@ func _get_wall_x_at_y(py: float) -> float:
 	return 160.0
 
 
+# Instant-kill any player whose X position is left of the morphing death wall.
+# Displays "CONSUMED" floating text and triggers screen shake.
 func _apply_scroller_damage(shape) -> void:
 	var main = Utils.get_scene_node()
 	if main == null:
@@ -392,6 +445,10 @@ func _apply_scroller_damage(shape) -> void:
 			player.die()
 
 
+# Create the Closing Storm's visual layer: boundary line, inverted fog polygon
+# (darkens everything OUTSIDE the shrunk area), and 600 fire emitters that
+# track the morphing boundary. This is the tile_map version — main.gd has a
+# simpler version with fewer emitters for the main scene layer.
 func _create_shrinking_outline() -> void:
 	_shrinking_outline_node = Node2D.new()
 	_shrinking_outline_node.z_index = 15
@@ -447,6 +504,8 @@ func _create_shrinking_outline() -> void:
 		_fire_emitters.append(emitter)
 
 
+# Layered sine waves for organic smoky wobble on the shrinking boundary.
+# Same pattern as hazard zones — multiple frequencies create unpredictable motion.
 func _get_morph_offset(angle: float) -> float:
 	# Same layered sine waves as hazard shapes for organic smoky wobble
 	var offset = sin(angle * 3.0 + _shrinking_morph_time * 2.3) * 0.4
@@ -456,6 +515,11 @@ func _get_morph_offset(angle: float) -> float:
 	return offset
 
 
+# Update the shrinking boundary's morphing outline and reposition fire emitters.
+# Walks each of the 4 rectangle edges, subdivides into SHRINKING_SEGS_PER_EDGE
+# segments, and displaces each segment point along the edge normal using the
+# layered sine wave morph function. The result is a continuously animating,
+# organic-looking boundary that flows around the full perimeter.
 func _update_shrinking_outline(shape) -> void:
 	if _shrinking_outline_node == null:
 		return
@@ -535,6 +599,8 @@ func _update_shrinking_outline(shape) -> void:
 			_fire_emitters[i].emitting = false
 
 
+# Update the inverted fog polygon to match the morphed boundary.
+# The fog uses invert_enable=true so it darkens everything OUTSIDE the polygon.
 func _update_shrinking_fog(_shape) -> void:
 	if _shrinking_fog == null:
 		return
@@ -545,6 +611,9 @@ func _update_shrinking_fog(_shape) -> void:
 		_shrinking_fog.polygon = _shape.get_collision_points()
 
 
+# Ray-casting point-in-polygon test against the morphed wavy boundary.
+# Uses the odd-even rule: cast a horizontal ray from point to +infinity,
+# count how many polygon edges it crosses. Odd = inside, even = outside.
 func _point_in_morphed_boundary(point: Vector2) -> bool:
 	# Ray-casting point-in-polygon test against the morphed wavy boundary
 	var poly = _shrinking_morphed_poly
@@ -563,6 +632,9 @@ func _point_in_morphed_boundary(point: Vector2) -> bool:
 	return inside
 
 
+# Deal percentage-based damage to a player outside the shrinking boundary.
+# Uses damage escalation: 20% base, 30% if hit again within 2 seconds.
+# This punishes lingering outside without being instantly lethal.
 func _deal_shrinking_damage(player, main) -> void:
 	var pid = player.get_instance_id()
 	var now = OS.get_ticks_msec()
@@ -601,6 +673,9 @@ func _deal_shrinking_damage(player, main) -> void:
 		player.die()
 
 
+# Two-phase shrinking damage: entry detection (instant) + tick damage (every 0.5s).
+# Entry detection fires when the morphed wave sweeps over the player, not just
+# when the player walks out — this makes the wobbly boundary feel dangerous.
 func _apply_shrinking_damage(_shape, delta: float) -> void:
 	var main = Utils.get_scene_node()
 	if main == null:
@@ -641,6 +716,7 @@ func _apply_shrinking_damage(_shape, delta: float) -> void:
 			_deal_shrinking_damage(player, main)
 
 
+# --- HAZARD ZONE damage and visuals ---
 var _hazard_damage_timers: Dictionary = {}  # player instance_id -> float
 const HAZARD_DAMAGE_INTERVAL := 0.5
 const HAZARD_DAMAGE_BASE := 0.20
@@ -657,6 +733,10 @@ var _player_hazard_zones: Dictionary = {}
 var _player_last_hazard_hit: Dictionary = {}  # player instance_id -> OS.get_ticks_msec()
 
 
+# --- MAZE / MULTIROOM wall visuals and projectile colliders ---
+
+# Replace floor tiles with colored wall rectangles for maze/multiroom internal walls.
+# Uses a darkened version of the zone's outline color for visual consistency.
 func _create_internal_wall_visuals(shape, zone: ZoneData) -> void:
 	var ts = Utils.TILE_SIZE
 	var wall_color = Color(0.2, 0.18, 0.15, 1.0)
@@ -681,6 +761,9 @@ func _create_internal_wall_visuals(shape, zone: ZoneData) -> void:
 				add_child(wall_rect)
 
 
+# Create an Area2D with collision shapes matching wall tiles that destroys
+# projectiles on contact. Without this, bullets would fly through maze walls.
+# Monitors player (8), enemy (16), and pet (1024) projectile collision layers.
 func _create_projectile_wall_colliders(shape) -> void:
 	# Create an Area2D that detects projectiles entering wall tiles
 	# and destroys them on contact
@@ -707,12 +790,15 @@ func _create_projectile_wall_colliders(shape) -> void:
 	wall_area.connect("area_entered", self, "_on_projectile_hit_wall")
 
 
+# Callback when a projectile enters a wall tile's Area2D — destroy it
 func _on_projectile_hit_wall(area: Area2D) -> void:
 	var projectile = area.get_parent()
 	if projectile != null and is_instance_valid(projectile) and projectile is Projectile:
 		projectile.queue_free()
 
 
+# Create visual overlays for each hazard zone: a translucent morphing polygon
+# plus a CPUParticles2D emitter covering the zone's radius with purple fire.
 func _create_hazard_overlays(shape) -> void:
 	var zones = shape.get_hazard_zones()
 
@@ -765,6 +851,8 @@ func _create_hazard_overlays(shape) -> void:
 		add_child(emitter)
 
 
+# Animate hazard zone outlines with layered sine-wave morphing.
+# Each zone gets a unique phase offset (+ zone index) so they wobble independently.
 func _update_hazard_rings(shape, delta: float) -> void:
 	_hazard_time += delta * HAZARD_MORPH_SPEED
 	var zones = shape.get_hazard_zones()
@@ -786,6 +874,8 @@ func _update_hazard_rings(shape, delta: float) -> void:
 		poly.polygon = pts
 
 
+# Deal percentage-based damage to a player inside a hazard zone.
+# Same escalation mechanic as shrinking: 20% base, 30% if hit again within 2s.
 func _deal_hazard_damage(player, main) -> void:
 	var pid = player.get_instance_id()
 	var now = OS.get_ticks_msec()
@@ -821,6 +911,9 @@ func _deal_hazard_damage(player, main) -> void:
 		player.die()
 
 
+# Two-phase hazard damage: entry detection (instant) + tick damage (every 0.5s).
+# Tracks which zone indices each player was in last frame — entering a NEW zone
+# triggers instant damage, staying in any zone triggers periodic ticks.
 func _apply_hazard_damage(shape, delta: float) -> void:
 	var main = Utils.get_scene_node()
 	if main == null:
@@ -860,6 +953,12 @@ func _apply_hazard_damage(shape, delta: float) -> void:
 			_deal_hazard_damage(player, main)
 
 
+# --- MAZE / MULTIROOM AStar2D navigation ---
+
+# Build an AStar2D navigation graph from walkable tiles.
+# Each walkable tile becomes a point; adjacent walkable tiles are connected.
+# Supports 4-directional + 4-diagonal movement, but diagonals are only allowed
+# when BOTH orthogonal neighbors are walkable (no corner-cutting through walls).
 func _create_navigation(shape, zone: ZoneData) -> void:
 	_astar = AStar2D.new()
 	var ts = Utils.TILE_SIZE
@@ -897,12 +996,20 @@ func _create_navigation(shape, zone: ZoneData) -> void:
 					_astar.connect_points(point_id, (j + 1) * _astar_tile_w + (i - 1))
 
 
+# Find the nearest AStar point to a world position
 func _get_closest_astar_point(pos: Vector2) -> int:
 	if _astar == null:
 		return -1
 	return _astar.get_closest_point(pos)
 
 
+# Steer all enemies along AStar paths toward the closest alive player.
+# Paths are recalculated every NAV_UPDATE_INTERVAL (0.15s).
+# Sets enemy._move_locked = true and overrides _current_movement to follow waypoints.
+#
+# Anti-stuck detection: if an enemy moves less than STUCK_MOVE_MIN (5px) in
+# STUCK_THRESHOLD (0.15s), it gets nudged 20px toward its waypoint and its path
+# is recalculated. This handles corner cases where physics bodies get wedged.
 func _steer_enemies_along_paths(delta: float, shape) -> void:
 	var main = Utils.get_scene_node()
 	if main == null or _astar == null:
@@ -1012,6 +1119,12 @@ func _steer_enemies_along_paths(delta: float, shape) -> void:
 			_enemy_path_idx.erase(eid)
 
 
+# Steer pets along AStar paths toward their current_target (usually an enemy).
+# Same pattern as enemy steering with two key differences:
+#   1. Respects existing _move_locked set by the pet itself (e.g., BonkDog jump)
+#      — only overrides movement when _pet_nav_locked is true (set by us)
+#   2. Targets can change mid-path — detects target_id changes and forces
+#      immediate path recalculation instead of waiting for the timer
 func _steer_pets_along_paths(delta: float, _shape) -> void:
 	var main = Utils.get_scene_node()
 	if main == null or _astar == null:

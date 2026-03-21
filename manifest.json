@@ -2,7 +2,7 @@
 	"name": "Arenas",
 	"namespace": "PapiLeem",
 	"version_number": "2.0.0",
-	"description": "Choose from 8 arena shapes per run: Rectangle, Circle, Hexagon, Curse Run (treadmill), Closing Storm (battle royale), Maze, Multi-Room, or Hazard Zones.",
+	"description": "Choose from 8 arena shapes per run: Default, Circle, Hexagon, Curse Run (treadmill), Closing Storm (battle royale), Maze, Caves, or Hazard Zones.",
 	"website_url": "",
 	"dependencies": [],
 	"extra": {
@@ -20,7 +20,7 @@
 					"default_arena_shape": {
 						"type": "integer",
 						"title": "Default Arena Shape",
-						"description": "0=Rectangle, 1=Circle, 2=Hexagon, 3=Curse Run, 4=Closing Storm, 5=Maze, 6=Multi-Room, 7=Hazard Zones",
+						"description": "0=Default, 1=Circle, 2=Hexagon, 3=Curse Run, 4=Closing Storm, 5=Maze, 6=Caves, 7=Hazard Zones",
 						"default": 0,
 						"minimum": 0,
 						"maximum": 7

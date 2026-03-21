@@ -1,3 +1,17 @@
+# mod_main.gd — Arenas mod entry point.
+#
+# Registers all script extensions that override base game systems, loads user
+# config from the mod loader, and injects translation strings for the arena
+# shape names and descriptions in 11 languages.
+#
+# Script extensions registered (in load order):
+#   1. zone_service.gd     — shape-aware positioning and zone setup
+#   2. my_tile_map_limits   — custom collision walls for non-rect shapes
+#   3. my_tile_map.gd      — tile fill, visuals, damage, and navigation
+#   4. entity_spawner.gd   — shape-aware enemy/item spawning
+#   5. run_options_panel    — arena shape dropdown in run options UI
+#   6. entity_birth.gd     — Curse Run spawn cancellation bypass
+
 extends Node
 
 const MOD_DIR = "PapiLeem-Arenas"
@@ -12,6 +26,8 @@ func _init():
 	mod_dir_path = ModLoaderMod.get_unpacked_dir().plus_file(MOD_DIR)
 	ext_dir = mod_dir_path.plus_file("extensions")
 
+	# Install script extensions — order matters: zone_service must be first
+	# so arena_shape is set up before tile map and spawner init
 	ModLoaderMod.install_script_extension(ext_dir + "/singletons/zone_service.gd")
 	ModLoaderMod.install_script_extension(ext_dir + "/global/my_tile_map_limits.gd")
 	ModLoaderMod.install_script_extension(ext_dir + "/global/my_tile_map.gd")
@@ -26,6 +42,11 @@ func _ready():
 	ModLoaderLog.info("Ready", MOD_LOG)
 
 
+# Load user-configurable settings from the mod's config_schema in manifest.json.
+# Supported keys:
+#   default_arena_shape (int 0-7)  — pre-selected shape in the dropdown
+#   shrinking_min_scale (float)    — how small Closing Storm arena gets
+#   shrinking_speed (float)        — how fast it shrinks
 func _load_config():
 	var config = ModLoaderConfig.get_current_config(MOD_DIR)
 	if config and config.data:
@@ -36,6 +57,10 @@ func _load_config():
 		ModLoaderLog.info("Config loaded - default shape: " + str(default_shape), MOD_LOG)
 
 
+# Register translation strings for all arena shape names and descriptions.
+# Each locale gets a Translation resource added to TranslationServer.
+# Keys follow the pattern ARENA_<SHAPE> for names and ARENA_SHAPE_DESC_<SHAPE>
+# for descriptions — these are looked up by run_options_panel.gd via tr().
 func _add_translations():
 	var translations = {
 		"en": {
@@ -46,7 +71,7 @@ func _add_translations():
 			"ARENA_CURSE_RUN": "Curse Run",
 			"ARENA_SHRINKING": "Closing Storm",
 			"ARENA_MAZE": "Maze",
-			"ARENA_MULTIROOM": "Multi-Room",
+			"ARENA_MULTIROOM": "Caves",
 			"ARENA_HAZARD": "Hazard Zones",
 			"ARENA_SHAPE_DESC_RECTANGLE": "Standard arena",
 			"ARENA_SHAPE_DESC_CIRCLE": "Circular arena - no corners to hide in",
@@ -54,7 +79,7 @@ func _add_translations():
 			"ARENA_SHAPE_DESC_CURSE_RUN": "Run right or die - curse wall chases you",
 			"ARENA_SHAPE_DESC_SHRINKING": "A deadly storm closes in - battle royale style",
 			"ARENA_SHAPE_DESC_MAZE": "Procedural maze - different layout every wave",
-			"ARENA_SHAPE_DESC_MULTIROOM": "Rooms connected by doorways",
+			"ARENA_SHAPE_DESC_MULTIROOM": "Caves connected by tunnels",
 			"ARENA_SHAPE_DESC_HAZARD": "Curse clouds that damage you on contact",
 		},
 		"fr": {

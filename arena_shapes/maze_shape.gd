@@ -1,13 +1,31 @@
+# maze_shape.gd — Procedural maze generated via recursive backtracker.
+#
+# Divides the arena into a grid of CELL_SIZE x CELL_SIZE tile cells, then
+# carves a perfect maze (every cell reachable from every other cell) using the
+# recursive backtracker algorithm (randomized DFS). Each cell tracks which
+# passages are open via a 4-bit bitmask: N=1, E=2, S=4, W=8.
+#
+# After generation, the center cell is fully opened (all 4 passages carved) and
+# a 3x3 area of wall tiles around the spawn point is cleared to guarantee the
+# player never spawns inside a wall.
+#
+# Wall tiles are stored in a dictionary for O(1) lookup by tile coordinate.
+# A corner cleanup pass fills isolated single-tile gaps surrounded by 3+ walls
+# to prevent entities from snagging on diagonal corners.
+#
+# Navigation (AStar2D pathfinding for enemies/pets) is handled by my_tile_map.gd,
+# not here — this shape only defines the wall layout.
+
 extends "res://mods-unpacked/PapiLeem-Arenas/arena_shapes/arena_shape.gd"
 
 # Maze grid: each cell is CELL_SIZE x CELL_SIZE tiles
 const CELL_SIZE := 6
 const WALL_THICKNESS := 1  # wall thickness in tiles
 
-var grid_w: int = 0
-var grid_h: int = 0
-var _cells: Array = []  # 2D array [x][y] of bitmask (N=1, E=2, S=4, W=8) for open passages
-var _wall_tiles: Dictionary = {}  # {Vector2(tx, ty): true} for wall tile positions
+var grid_w: int = 0              # number of cells horizontally
+var grid_h: int = 0              # number of cells vertically
+var _cells: Array = []           # 2D array [x][y] of bitmask (N=1, E=2, S=4, W=8)
+var _wall_tiles: Dictionary = {} # {Vector2(tx, ty): true} for wall tile positions
 var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
 
@@ -18,6 +36,7 @@ func get_shape_id() -> int:
 func setup(p_width_px: float, p_height_px: float) -> void:
 	.setup(p_width_px, p_height_px)
 
+	# Calculate grid dimensions from arena size and cell size
 	var tile_w = int(p_width_px / Utils.TILE_SIZE)
 	var tile_h = int(p_height_px / Utils.TILE_SIZE)
 	grid_w = max(2, tile_w / CELL_SIZE)
@@ -30,9 +49,9 @@ func setup(p_width_px: float, p_height_px: float) -> void:
 	_clear_center_tiles(tile_w, tile_h)
 
 
+# Open all 4 passages from the grid cell containing the map center.
+# This guarantees the player spawn area has room to move in every direction.
 func _clear_center_cell() -> void:
-	# Find the grid cell that contains the map center and carve all passages
-	# so the player can never spawn inside a wall
 	var center_gx = int(grid_w / 2)
 	var center_gy = int(grid_h / 2)
 	center_gx = clamp(center_gx, 0, grid_w - 1)
@@ -53,19 +72,22 @@ func _clear_center_cell() -> void:
 		_cells[center_gx - 1][center_gy] |= 2
 
 
+# Remove any wall tiles in a 3x3 area around the exact pixel-center spawn point.
+# This is a safety net in case the cell-level clearing wasn't enough.
 func _clear_center_tiles(tile_w: int, tile_h: int) -> void:
-	# Remove any wall tiles in a radius around the exact spawn point
-	# Player spawns at pixel center = (tile_w / 2, tile_h / 2) in tile coords
 	var cx = int(tile_w / 2)
 	var cy = int(tile_h / 2)
-	# Clear a 3x3 area around spawn to guarantee no wall overlap
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			_wall_tiles.erase(Vector2(cx + dx, cy + dy))
 
 
+# Generate a perfect maze using recursive backtracker (randomized DFS).
+# Starting from cell (0,0), visit random unvisited neighbors and carve
+# passages between them. Backtrack when stuck. Produces a maze where every
+# cell is reachable from every other cell (spanning tree of the grid graph).
 func _generate_maze() -> void:
-	# Initialize grid with no passages
+	# Initialize grid with no passages (all walls closed)
 	_cells.clear()
 	for x in grid_w:
 		var col = []
@@ -73,7 +95,7 @@ func _generate_maze() -> void:
 			col.append(0)
 		_cells.append(col)
 
-	# Recursive backtracker
+	# Recursive backtracker using an explicit stack
 	var stack = []
 	var visited = {}
 	var start = Vector2(0, 0)
@@ -87,13 +109,15 @@ func _generate_maze() -> void:
 		var neighbors = _get_unvisited_neighbors(cx, cy, visited)
 
 		if neighbors.empty():
+			# Dead end — backtrack
 			stack.pop_back()
 		else:
+			# Pick a random unvisited neighbor and carve a passage to it
 			var next = neighbors[_rng.randi() % neighbors.size()]
 			var nx = int(next.x)
 			var ny = int(next.y)
 
-			# Carve passage
+			# Carve passage by setting bits on both sides of the wall
 			if nx == cx + 1:  # East
 				_cells[cx][cy] |= 2
 				_cells[nx][ny] |= 8
@@ -111,6 +135,7 @@ func _generate_maze() -> void:
 			stack.push_back(next)
 
 
+# Return all unvisited orthogonal neighbors of cell (cx, cy)
 func _get_unvisited_neighbors(cx: int, cy: int, visited: Dictionary) -> Array:
 	var result = []
 	if cx > 0 and not visited.has(Vector2(cx - 1, cy)):
@@ -124,6 +149,10 @@ func _get_unvisited_neighbors(cx: int, cy: int, visited: Dictionary) -> Array:
 	return result
 
 
+# Convert the cell bitmask grid into individual wall tiles.
+# For each cell, if the South or East passage is closed, place wall tiles
+# along that edge. (North and West walls are implicitly handled by the
+# neighboring cell's South and East walls respectively.)
 func _build_wall_tiles(tile_w: int, tile_h: int) -> void:
 	_wall_tiles.clear()
 
@@ -132,7 +161,7 @@ func _build_wall_tiles(tile_w: int, tile_h: int) -> void:
 			var bx = gx * CELL_SIZE
 			var by = gy * CELL_SIZE
 
-			# South wall (WALL_THICKNESS rows)
+			# South wall: place WALL_THICKNESS rows of tiles at cell's bottom edge
 			if not (_cells[gx][gy] & 4):
 				for wt in WALL_THICKNESS:
 					var wy = by + CELL_SIZE - WALL_THICKNESS + wt
@@ -140,7 +169,7 @@ func _build_wall_tiles(tile_w: int, tile_h: int) -> void:
 						for wx in range(bx, min(bx + CELL_SIZE, tile_w)):
 							_wall_tiles[Vector2(wx, wy)] = true
 
-			# East wall (WALL_THICKNESS columns)
+			# East wall: place WALL_THICKNESS columns of tiles at cell's right edge
 			if not (_cells[gx][gy] & 2):
 				for wt in WALL_THICKNESS:
 					var wx = bx + CELL_SIZE - WALL_THICKNESS + wt
@@ -148,25 +177,26 @@ func _build_wall_tiles(tile_w: int, tile_h: int) -> void:
 						for wy in range(by, min(by + CELL_SIZE, tile_h)):
 							_wall_tiles[Vector2(wx, wy)] = true
 
-	# Corner cleanup: fill diagonal gaps where two walls meet at a corner
-	# to prevent single-tile snag points
+	# Fill diagonal gaps where two walls meet at corners
 	_cleanup_corners(tile_w, tile_h)
 
 
+# Fill isolated single-tile gaps that are surrounded by 3+ orthogonal wall tiles.
+# Without this, entities can get snagged on diagonal corners where two walls
+# meet but leave a 1-tile gap that's technically walkable but causes movement
+# issues with physics bodies.
 func _cleanup_corners(tile_w: int, tile_h: int) -> void:
 	var to_fill = []
 	for x in range(1, tile_w - 1):
 		for y in range(1, tile_h - 1):
 			if _wall_tiles.has(Vector2(x, y)):
 				continue
-			# Check if this open tile creates a diagonal snag:
-			# wall above + wall left but open above-left (or similar combos)
+			# Check orthogonal neighbors
 			var n = _wall_tiles.has(Vector2(x, y - 1))
 			var s = _wall_tiles.has(Vector2(x, y + 1))
 			var e = _wall_tiles.has(Vector2(x + 1, y))
 			var w = _wall_tiles.has(Vector2(x - 1, y))
-			# If two adjacent orthogonal neighbors are walls forming a corner,
-			# and the diagonal between them is open, fill this tile
+			# Skip if this is a legitimate corner (wall pair with open diagonal)
 			if (n and e and not _wall_tiles.has(Vector2(x + 1, y - 1))):
 				continue
 			if (n and w and not _wall_tiles.has(Vector2(x - 1, y - 1))):
@@ -175,7 +205,7 @@ func _cleanup_corners(tile_w: int, tile_h: int) -> void:
 				continue
 			if (s and w and not _wall_tiles.has(Vector2(x - 1, y + 1))):
 				continue
-			# Fill isolated single-tile gaps surrounded by 3+ walls
+			# Fill tiles surrounded by 3+ walls — these are dead-end pockets
 			var wall_count = int(n) + int(s) + int(e) + int(w)
 			if wall_count >= 3:
 				to_fill.append(Vector2(x, y))
@@ -184,28 +214,34 @@ func _cleanup_corners(tile_w: int, tile_h: int) -> void:
 		_wall_tiles[pos] = true
 
 
+# A tile is walkable (should be filled with floor) if it's NOT a wall tile
 func should_fill_tile(tile_x: int, tile_y: int, _tile_size: int) -> bool:
 	return not _wall_tiles.has(Vector2(tile_x, tile_y))
 
 
+# Point containment: convert pixel position to tile coords and check wall dict
 func contains_point(point: Vector2) -> bool:
 	var tx = int(point.x / Utils.TILE_SIZE)
 	var ty = int(point.y / Utils.TILE_SIZE)
 	return not _wall_tiles.has(Vector2(tx, ty))
 
 
+# No meaningful clamping for maze — entities stuck in walls are handled
+# by the navigation system's anti-stuck detection instead
 func clamp_position(point: Vector2) -> Vector2:
 	return point
 
 
+# Pick a random walkable (non-wall) tile via rejection sampling.
+# Up to 50 attempts before falling back to center.
 func get_rand_pos(edge: float) -> Vector2:
-	# Pick a random corridor tile
 	var tile_w = int(width_px / Utils.TILE_SIZE)
 	var tile_h = int(height_px / Utils.TILE_SIZE)
 	for _attempt in 50:
 		var tx = _rng.randi_range(0, tile_w - 1)
 		var ty = _rng.randi_range(0, tile_h - 1)
 		if not _wall_tiles.has(Vector2(tx, ty)):
+			# Return the center of the tile in pixel coords
 			return Vector2(
 				tx * Utils.TILE_SIZE + Utils.TILE_SIZE / 2.0,
 				ty * Utils.TILE_SIZE + Utils.TILE_SIZE / 2.0
@@ -213,10 +249,12 @@ func get_rand_pos(edge: float) -> Vector2:
 	return center
 
 
+# Edge spawning delegates to random position — maze has no meaningful "edge"
 func get_rand_edge_pos(dist: float) -> Vector2:
 	return get_rand_pos(dist)
 
 
+# Outer rectangle collision (maze uses internal walls for actual boundaries)
 func get_collision_points(_num_segments: int = 32) -> PoolVector2Array:
 	return PoolVector2Array([
 		Vector2.ZERO,
@@ -226,12 +264,15 @@ func get_collision_points(_num_segments: int = 32) -> PoolVector2Array:
 	])
 
 
+# Closed loop outline around the full arena rectangle
 func get_outline_points() -> PoolVector2Array:
 	var pts = get_collision_points()
 	pts.append(pts[0])
 	return pts
 
 
+# Convert wall tile positions to collision data for my_tile_map_limits.gd.
+# Each wall tile becomes a dict with center position and half-extents.
 func get_internal_walls() -> Array:
 	var walls = []
 	var ts = Utils.TILE_SIZE

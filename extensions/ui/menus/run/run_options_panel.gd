@@ -1,10 +1,23 @@
+# run_options_panel.gd — Adds arena shape dropdown to the run options screen.
+#
+# Creates an OptionButton populated with shape names (translated via tr())
+# and a description Label that updates on selection. The selected shape index
+# is persisted in ProgressData.settings["arena_shape_selected"] so it survives
+# save/resume and is read by zone_service.gd when loading a zone.
+#
+# SHAPE_NAMES indices (0-7) must stay aligned with arena_shape.gd's constants.
+# SHAPE_DESCS_EN provides English fallback descriptions in case translation
+# returns the key unchanged (which happens when a locale is missing).
+
 extends "res://ui/menus/run/run_options_panel.gd"
 
 var _arena_shape_option: OptionButton
 var _arena_desc_label: Label
 
+# Translation keys — indices match ArenaShapeClass.SHAPE_* constants
 const SHAPE_NAMES = ["ARENA_RECTANGLE", "ARENA_CIRCLE", "ARENA_HEXAGON", "ARENA_CURSE_RUN", "ARENA_SHRINKING", "ARENA_MAZE", "ARENA_MULTIROOM", "ARENA_HAZARD"]
 
+# English fallback descriptions (used when tr() returns the key unchanged)
 const SHAPE_DESCS_EN = [
 	"Standard arena",
 	"Circular arena - no corners to hide in",
@@ -22,6 +35,7 @@ func init():
 	_setup_arena_shape()
 
 
+# Build the arena shape dropdown and description label, insert into the UI.
 func _setup_arena_shape():
 	var buttons_vbox = $MarginContainer/VBoxContainer/VBoxContainer
 	var zone_button = buttons_vbox.get_child(0)  # ZoneSelectionButton is first child
@@ -62,16 +76,22 @@ func _setup_arena_shape():
 	_update_desc_label()
 
 
+# Callback when the player selects a shape from the dropdown.
+# Persists the selection in ProgressData so zone_service.gd can read it.
 func _on_arena_shape_selected(index: int):
 	ZoneService.arena_shape_id = index
 	ProgressData.settings["arena_shape_selected"] = index
 	_update_desc_label()
 
 
+# Derive the description translation key from the shape name key.
+# e.g., "ARENA_CIRCLE" -> "ARENA_SHAPE_DESC_CIRCLE"
 func _get_desc_key(shape_name: String) -> String:
 	return shape_name.replace("ARENA_", "ARENA_SHAPE_DESC_")
 
 
+# Update the description label text for the currently selected shape.
+# Uses tr() for localized text, falling back to SHAPE_DESCS_EN if untranslated.
 func _update_desc_label():
 	var index = _arena_shape_option.selected
 	var desc_key = _get_desc_key(SHAPE_NAMES[index])
