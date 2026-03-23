@@ -28,3 +28,8 @@ Your arena choice persists through save/resume.
 ## Languages
 
 Translated in 12 languages: English, French, Spanish, German, Russian, Portuguese, Polish, Italian, Turkish, Chinese (Simplified & Traditional), and Japanese.
+
+## Installation:
+Just hit Subscribe, and the mod will be added to your game automatically. No setup required.
+
+https://steamcommunity.com/sharedfiles/filedetails/?id=3689469294
