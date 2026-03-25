@@ -14,22 +14,31 @@ extends "res://singletons/zone_service.gd"
 
 const ArenaShapeClass = preload("res://mods-unpacked/PapiLeem-Arenas/arena_shapes/arena_shape.gd")
 
-var arena_shape_id = 0                # currently selected shape (0-7)
+var arena_shape_id = 0                # currently selected shape (0-8, 8 = random)
 var arena_shape = null                # active ArenaShape instance (null = vanilla rectangle)
 var arena_shrinking_min_scale = 0.4   # configurable via manifest
 var arena_shrinking_speed = 1.0       # configurable via manifest
+var _resolved_shape_id = 0            # per-wave resolved shape (random picks 1-7 each wave)
 
 
 # Override set_current_zone to inject shape setup after the parent resolves
 # zone dimensions. Hexagon gets a 30% size boost because a hexagon inscribed
 # in a rectangle only covers ~87% of the area — the boost compensates.
 func set_current_zone(p_current_zone: ZoneData) -> void:
+	# Resolve shape ID for this wave (random picks a concrete shape each wave)
+	_resolved_shape_id = 0
 	if ProgressData.settings.has("arena_shape_selected"):
-		var shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, 7))
-		if shape_id == ArenaShapeClass.SHAPE_HEXAGON:
-			var boost = 1.3
-			p_current_zone.width = max(p_current_zone.width, int(p_current_zone.width * boost))
-			p_current_zone.height = max(p_current_zone.height, int(p_current_zone.height * boost))
+		var shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, 8))
+		if shape_id == ArenaShapeClass.SHAPE_RANDOM:
+			_resolved_shape_id = randi() % 8
+		else:
+			_resolved_shape_id = shape_id
+
+	if _resolved_shape_id == ArenaShapeClass.SHAPE_HEXAGON:
+		var boost = 1.3
+		p_current_zone.width = max(p_current_zone.width, int(p_current_zone.width * boost))
+		p_current_zone.height = max(p_current_zone.height, int(p_current_zone.height * boost))
+
 	.set_current_zone(p_current_zone)
 	_setup_arena_shape()
 
@@ -40,9 +49,10 @@ func set_current_zone(p_current_zone: ZoneData) -> void:
 func _setup_arena_shape() -> void:
 	# Restore selection from ProgressData (persists across save/resume)
 	if ProgressData.settings.has("arena_shape_selected"):
-		arena_shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, 7))
+		arena_shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, 8))
 
-	var shape = ArenaShapeClass.create_shape(arena_shape_id)
+	# Use the resolved ID (handles random → concrete shape per wave)
+	var shape = ArenaShapeClass.create_shape(_resolved_shape_id)
 
 	if shape != null:
 		shape.setup(current_zone_max_position.x, current_zone_max_position.y)

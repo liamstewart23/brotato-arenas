@@ -15,7 +15,7 @@ var _arena_shape_option: OptionButton
 var _arena_desc_label: Label
 
 # Translation keys — indices match ArenaShapeClass.SHAPE_* constants
-const SHAPE_NAMES = ["ARENA_RECTANGLE", "ARENA_CIRCLE", "ARENA_HEXAGON", "ARENA_CURSE_RUN", "ARENA_SHRINKING", "ARENA_MAZE", "ARENA_MULTIROOM", "ARENA_HAZARD"]
+const SHAPE_NAMES = ["ARENA_RECTANGLE", "ARENA_CIRCLE", "ARENA_HEXAGON", "ARENA_CURSE_RUN", "ARENA_SHRINKING", "ARENA_MAZE", "ARENA_MULTIROOM", "ARENA_HAZARD", "ARENA_RANDOM"]
 
 # English fallback descriptions (used when tr() returns the key unchanged)
 const SHAPE_DESCS_EN = [
@@ -27,6 +27,7 @@ const SHAPE_DESCS_EN = [
 	"Procedural maze - different layout every wave",
 	"Rooms connected by doorways",
 	"Curse clouds that damage you on contact",
+	"Random arena shape each wave",
 ]
 
 

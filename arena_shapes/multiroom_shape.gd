@@ -52,6 +52,7 @@ func setup(p_width_px: float, p_height_px: float) -> void:
 	_keep_largest_region(tile_w, tile_h)
 	_scatter_pillars(tile_w, tile_h)
 	_cleanup_corners(tile_w, tile_h)
+	_chamfer_inner_corners(tile_w, tile_h)
 	_clear_center_tiles(tile_w, tile_h)
 	_validate_connectivity(tile_w, tile_h)
 
@@ -285,32 +286,67 @@ func _scatter_pillars(tile_w: int, tile_h: int) -> void:
 				_wall_tiles[Vector2(pos.x + dx, pos.y + dy)] = true
 
 
-# Fill isolated 1-tile gaps surrounded by 3+ wall neighbors.
-# Same cleanup as maze_shape.gd — prevents entity snagging on corners.
+# Close diagonal gaps where two walls touch only at a corner, and fill
+# dead-end pockets. Same logic as maze_shape.gd — prevents mobs getting
+# stuck on diagonal wall corners.
 func _cleanup_corners(tile_w: int, tile_h: int) -> void:
-	var to_fill = []
+	var to_fill = {}
+
+	# Pass 1: seal diagonal wall pairs (checkerboard in any 2x2 block)
+	for x in range(0, tile_w - 1):
+		for y in range(0, tile_h - 1):
+			var tl = _wall_tiles.has(Vector2(x, y))
+			var tr = _wall_tiles.has(Vector2(x + 1, y))
+			var bl = _wall_tiles.has(Vector2(x, y + 1))
+			var br = _wall_tiles.has(Vector2(x + 1, y + 1))
+
+			if tl and br and not tr and not bl:
+				to_fill[_pick_fill_target(x + 1, y, x, y + 1, tile_w, tile_h)] = true
+			elif tr and bl and not tl and not br:
+				to_fill[_pick_fill_target(x, y, x + 1, y + 1, tile_w, tile_h)] = true
+
+	# Pass 2: fill floor tiles with 3+ orthogonal wall neighbors (dead pockets)
 	for x in range(1, tile_w - 1):
 		for y in range(1, tile_h - 1):
-			if _wall_tiles.has(Vector2(x, y)):
+			if _wall_tiles.has(Vector2(x, y)) or to_fill.has(Vector2(x, y)):
 				continue
-			var n = _wall_tiles.has(Vector2(x, y - 1))
-			var s = _wall_tiles.has(Vector2(x, y + 1))
-			var e = _wall_tiles.has(Vector2(x + 1, y))
-			var w = _wall_tiles.has(Vector2(x - 1, y))
-			if (n and e and not _wall_tiles.has(Vector2(x + 1, y - 1))):
-				continue
-			if (n and w and not _wall_tiles.has(Vector2(x - 1, y - 1))):
-				continue
-			if (s and e and not _wall_tiles.has(Vector2(x + 1, y + 1))):
-				continue
-			if (s and w and not _wall_tiles.has(Vector2(x - 1, y + 1))):
-				continue
-			var wall_count = int(n) + int(s) + int(e) + int(w)
+			var wall_count = 0
+			if _wall_tiles.has(Vector2(x, y - 1)) or to_fill.has(Vector2(x, y - 1)):
+				wall_count += 1
+			if _wall_tiles.has(Vector2(x, y + 1)) or to_fill.has(Vector2(x, y + 1)):
+				wall_count += 1
+			if _wall_tiles.has(Vector2(x + 1, y)) or to_fill.has(Vector2(x + 1, y)):
+				wall_count += 1
+			if _wall_tiles.has(Vector2(x - 1, y)) or to_fill.has(Vector2(x - 1, y)):
+				wall_count += 1
 			if wall_count >= 3:
-				to_fill.append(Vector2(x, y))
+				to_fill[Vector2(x, y)] = true
 
 	for pos in to_fill:
 		_wall_tiles[pos] = true
+
+
+func _pick_fill_target(ax: int, ay: int, bx: int, by: int, tile_w: int, tile_h: int) -> Vector2:
+	var a = Vector2(ax, ay)
+	var b = Vector2(bx, by)
+	var a_border = ax <= 0 or ax >= tile_w - 1 or ay <= 0 or ay >= tile_h - 1
+	var b_border = bx <= 0 or bx >= tile_w - 1 or by <= 0 or by >= tile_h - 1
+	if a_border and not b_border:
+		return b
+	if b_border and not a_border:
+		return a
+	var a_walls = _count_ortho_walls(ax, ay)
+	var b_walls = _count_ortho_walls(bx, by)
+	return a if a_walls >= b_walls else b
+
+
+func _count_ortho_walls(x: int, y: int) -> int:
+	var count = 0
+	if _wall_tiles.has(Vector2(x, y - 1)): count += 1
+	if _wall_tiles.has(Vector2(x, y + 1)): count += 1
+	if _wall_tiles.has(Vector2(x + 1, y)): count += 1
+	if _wall_tiles.has(Vector2(x - 1, y)): count += 1
+	return count
 
 
 # Clear a diamond-shaped area around the map center to prevent spawn-in-wall.
@@ -376,6 +412,32 @@ func _find_nearest_visited(pos: Vector2, visited: Dictionary, _tile_w: int, _til
 
 
 # --- Public API (unchanged — all depend only on _wall_tiles) ---
+
+
+# Bevel inner right-angle wall corners so mobs don't clip them when turning.
+func _chamfer_inner_corners(tile_w: int, tile_h: int) -> void:
+	var to_remove = []
+	for x in range(1, tile_w - 1):
+		for y in range(1, tile_h - 1):
+			if not _wall_tiles.has(Vector2(x, y)):
+				continue
+
+			var n = _wall_tiles.has(Vector2(x, y - 1))
+			var s = _wall_tiles.has(Vector2(x, y + 1))
+			var e = _wall_tiles.has(Vector2(x + 1, y))
+			var w = _wall_tiles.has(Vector2(x - 1, y))
+
+			if n and e and not s and not w and _wall_tiles.has(Vector2(x + 1, y - 1)):
+				to_remove.append(Vector2(x, y))
+			elif n and w and not s and not e and _wall_tiles.has(Vector2(x - 1, y - 1)):
+				to_remove.append(Vector2(x, y))
+			elif s and e and not n and not w and _wall_tiles.has(Vector2(x + 1, y + 1)):
+				to_remove.append(Vector2(x, y))
+			elif s and w and not n and not e and _wall_tiles.has(Vector2(x - 1, y + 1)):
+				to_remove.append(Vector2(x, y))
+
+	for pos in to_remove:
+		_wall_tiles.erase(pos)
 
 
 # A tile is walkable if it's NOT in the wall dictionary

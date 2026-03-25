@@ -36,16 +36,21 @@ func get_shape_id() -> int:
 func setup(p_width_px: float, p_height_px: float) -> void:
 	.setup(p_width_px, p_height_px)
 
-	# Calculate grid dimensions from arena size and cell size
+	# Calculate grid dimensions from arena size and cell size.
+	# Ceiling division ensures the maze grid spans the full tile area
+	# so outer walls land on the map edge with no gap beyond them.
 	var tile_w = int(p_width_px / Utils.TILE_SIZE)
 	var tile_h = int(p_height_px / Utils.TILE_SIZE)
-	grid_w = max(2, tile_w / CELL_SIZE)
-	grid_h = max(2, tile_h / CELL_SIZE)
+	grid_w = max(2, (tile_w + CELL_SIZE - 1) / CELL_SIZE)
+	grid_h = max(2, (tile_h + CELL_SIZE - 1) / CELL_SIZE)
 
 	_rng.randomize()  # unique maze layout every run
 	_generate_maze()
 	_clear_center_cell()
 	_build_wall_tiles(tile_w, tile_h)
+	_widen_narrow_passages(tile_w, tile_h)
+	_cleanup_corners(tile_w, tile_h)
+	_chamfer_inner_corners(tile_w, tile_h)
 	_clear_center_tiles(tile_w, tile_h)
 
 
@@ -177,41 +182,162 @@ func _build_wall_tiles(tile_w: int, tile_h: int) -> void:
 						for wy in range(by, min(by + CELL_SIZE, tile_h)):
 							_wall_tiles[Vector2(wx, wy)] = true
 
-	# Fill diagonal gaps where two walls meet at corners
-	_cleanup_corners(tile_w, tile_h)
+	# Place solid walls along all 4 outer edges so the maze boundary
+	# sits exactly on the map edge (prevents mobs spawning in gaps).
+	_build_border_walls(tile_w, tile_h)
 
 
-# Fill isolated single-tile gaps that are surrounded by 3+ orthogonal wall tiles.
-# Without this, entities can get snagged on diagonal corners where two walls
-# meet but leave a 1-tile gap that's technically walkable but causes movement
-# issues with physics bodies.
+# Place solid wall tiles along all 4 outer edges of the tile map so the maze
+# boundary always sits on the map edge with no walkable gap beyond it.
+func _build_border_walls(tile_w: int, tile_h: int) -> void:
+	for x in tile_w:
+		_wall_tiles[Vector2(x, 0)] = true              # Top edge
+		_wall_tiles[Vector2(x, tile_h - 1)] = true     # Bottom edge
+	for y in tile_h:
+		_wall_tiles[Vector2(0, y)] = true              # Left edge
+		_wall_tiles[Vector2(tile_w - 1, y)] = true     # Right edge
+
+
+# Ensure no passage is only 1 tile wide. Any floor tile with walls on both
+# opposite sides (N+S or E+W) is a single-tile corridor — widen it by removing
+# one of those wall tiles (preferring south/east, skipping border tiles).
+# Runs iteratively since widening can expose new single-tile pinch points.
+func _widen_narrow_passages(tile_w: int, tile_h: int) -> void:
+	var changed = true
+	while changed:
+		changed = false
+		var to_remove = []
+		for x in range(1, tile_w - 1):
+			for y in range(1, tile_h - 1):
+				if _wall_tiles.has(Vector2(x, y)):
+					continue
+				var wall_n = _wall_tiles.has(Vector2(x, y - 1))
+				var wall_s = _wall_tiles.has(Vector2(x, y + 1))
+				var wall_e = _wall_tiles.has(Vector2(x + 1, y))
+				var wall_w = _wall_tiles.has(Vector2(x - 1, y))
+
+				# 1-tile-tall horizontal passage (walls north + south)
+				if wall_n and wall_s:
+					if y + 1 < tile_h - 1:
+						to_remove.append(Vector2(x, y + 1))
+					elif y - 1 > 0:
+						to_remove.append(Vector2(x, y - 1))
+
+				# 1-tile-wide vertical passage (walls east + west)
+				if wall_e and wall_w:
+					if x + 1 < tile_w - 1:
+						to_remove.append(Vector2(x + 1, y))
+					elif x - 1 > 0:
+						to_remove.append(Vector2(x - 1, y))
+
+		for pos in to_remove:
+			if _wall_tiles.has(pos):
+				_wall_tiles.erase(pos)
+				changed = true
+
+
+# Close diagonal gaps where two walls touch only at a corner. In each 2x2
+# block, if walls sit on one diagonal and floor on the other (checkerboard),
+# mobs try to squeeze through and get stuck. Fill one floor tile to seal it.
+# Also fills any floor tile surrounded by 3+ orthogonal walls (dead-end pockets).
 func _cleanup_corners(tile_w: int, tile_h: int) -> void:
-	var to_fill = []
+	var to_fill = {}
+
+	# Pass 1: seal diagonal wall pairs (checkerboard in any 2x2 block)
+	for x in range(0, tile_w - 1):
+		for y in range(0, tile_h - 1):
+			var tl = _wall_tiles.has(Vector2(x, y))
+			var tr = _wall_tiles.has(Vector2(x + 1, y))
+			var bl = _wall_tiles.has(Vector2(x, y + 1))
+			var br = _wall_tiles.has(Vector2(x + 1, y + 1))
+
+			if tl and br and not tr and not bl:
+				# Diagonal: TL + BR are walls, TR + BL are floor — fill one
+				to_fill[_pick_fill_target(x + 1, y, x, y + 1, tile_w, tile_h)] = true
+			elif tr and bl and not tl and not br:
+				# Diagonal: TR + BL are walls, TL + BR are floor — fill one
+				to_fill[_pick_fill_target(x, y, x + 1, y + 1, tile_w, tile_h)] = true
+
+	# Pass 2: fill floor tiles with 3+ orthogonal wall neighbors (dead pockets)
 	for x in range(1, tile_w - 1):
 		for y in range(1, tile_h - 1):
-			if _wall_tiles.has(Vector2(x, y)):
+			if _wall_tiles.has(Vector2(x, y)) or to_fill.has(Vector2(x, y)):
 				continue
-			# Check orthogonal neighbors
+			var wall_count = 0
+			if _wall_tiles.has(Vector2(x, y - 1)) or to_fill.has(Vector2(x, y - 1)):
+				wall_count += 1
+			if _wall_tiles.has(Vector2(x, y + 1)) or to_fill.has(Vector2(x, y + 1)):
+				wall_count += 1
+			if _wall_tiles.has(Vector2(x + 1, y)) or to_fill.has(Vector2(x + 1, y)):
+				wall_count += 1
+			if _wall_tiles.has(Vector2(x - 1, y)) or to_fill.has(Vector2(x - 1, y)):
+				wall_count += 1
+			if wall_count >= 3:
+				to_fill[Vector2(x, y)] = true
+
+	for pos in to_fill:
+		_wall_tiles[pos] = true
+
+
+# Pick which of two floor tiles to fill when sealing a diagonal gap.
+# Prefers the tile with more orthogonal wall neighbors (more "wall-like").
+# Avoids border tiles so outer walls stay intact.
+func _pick_fill_target(ax: int, ay: int, bx: int, by: int, tile_w: int, tile_h: int) -> Vector2:
+	var a = Vector2(ax, ay)
+	var b = Vector2(bx, by)
+	# Don't fill border tiles
+	var a_border = ax <= 0 or ax >= tile_w - 1 or ay <= 0 or ay >= tile_h - 1
+	var b_border = bx <= 0 or bx >= tile_w - 1 or by <= 0 or by >= tile_h - 1
+	if a_border and not b_border:
+		return b
+	if b_border and not a_border:
+		return a
+	# Count orthogonal wall neighbors — fill whichever is more wall-surrounded
+	var a_walls = _count_ortho_walls(ax, ay)
+	var b_walls = _count_ortho_walls(bx, by)
+	return a if a_walls >= b_walls else b
+
+
+func _count_ortho_walls(x: int, y: int) -> int:
+	var count = 0
+	if _wall_tiles.has(Vector2(x, y - 1)): count += 1
+	if _wall_tiles.has(Vector2(x, y + 1)): count += 1
+	if _wall_tiles.has(Vector2(x + 1, y)): count += 1
+	if _wall_tiles.has(Vector2(x - 1, y)): count += 1
+	return count
+
+
+# Bevel inner right-angle wall corners so mobs don't clip them when turning.
+# An inner corner is a wall tile with exactly 2 adjacent orthogonal wall
+# neighbors (forming an L), floor on the other 2 sides, and a solid diagonal
+# behind the L. Removing it creates a smooth 45-degree cut at every junction.
+func _chamfer_inner_corners(tile_w: int, tile_h: int) -> void:
+	var to_remove = []
+	for x in range(1, tile_w - 1):
+		for y in range(1, tile_h - 1):
+			if not _wall_tiles.has(Vector2(x, y)):
+				continue
+
 			var n = _wall_tiles.has(Vector2(x, y - 1))
 			var s = _wall_tiles.has(Vector2(x, y + 1))
 			var e = _wall_tiles.has(Vector2(x + 1, y))
 			var w = _wall_tiles.has(Vector2(x - 1, y))
-			# Skip if this is a legitimate corner (wall pair with open diagonal)
-			if (n and e and not _wall_tiles.has(Vector2(x + 1, y - 1))):
-				continue
-			if (n and w and not _wall_tiles.has(Vector2(x - 1, y - 1))):
-				continue
-			if (s and e and not _wall_tiles.has(Vector2(x + 1, y + 1))):
-				continue
-			if (s and w and not _wall_tiles.has(Vector2(x - 1, y + 1))):
-				continue
-			# Fill tiles surrounded by 3+ walls — these are dead-end pockets
-			var wall_count = int(n) + int(s) + int(e) + int(w)
-			if wall_count >= 3:
-				to_fill.append(Vector2(x, y))
 
-	for pos in to_fill:
-		_wall_tiles[pos] = true
+			# NE inner corner: wall N+E, floor S+W, solid diagonal NE
+			if n and e and not s and not w and _wall_tiles.has(Vector2(x + 1, y - 1)):
+				to_remove.append(Vector2(x, y))
+			# NW inner corner: wall N+W, floor S+E, solid diagonal NW
+			elif n and w and not s and not e and _wall_tiles.has(Vector2(x - 1, y - 1)):
+				to_remove.append(Vector2(x, y))
+			# SE inner corner: wall S+E, floor N+W, solid diagonal SE
+			elif s and e and not n and not w and _wall_tiles.has(Vector2(x + 1, y + 1)):
+				to_remove.append(Vector2(x, y))
+			# SW inner corner: wall S+W, floor N+E, solid diagonal SW
+			elif s and w and not n and not e and _wall_tiles.has(Vector2(x - 1, y + 1)):
+				to_remove.append(Vector2(x, y))
+
+	for pos in to_remove:
+		_wall_tiles.erase(pos)
 
 
 # A tile is walkable (should be filled with floor) if it's NOT a wall tile

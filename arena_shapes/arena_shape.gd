@@ -22,6 +22,7 @@ const SHAPE_SHRINKING = 4
 const SHAPE_MAZE = 5
 const SHAPE_MULTIROOM = 6
 const SHAPE_HAZARD = 7
+const SHAPE_RANDOM = 8
 
 # Arena dimensions in pixels, set by setup()
 var center := Vector2.ZERO
