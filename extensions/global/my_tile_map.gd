@@ -94,6 +94,15 @@ var _pet_nav_locked: Dictionary = {}    # true when WE set _move_locked
 var _pet_last_target: Dictionary = {}   # track target changes for immediate recalc
 var _pet_nav_update_timer: float = 0.0
 
+# Circle/Hexagon/Shrinking pet wall avoidance
+var _shape_pet_last_pos: Dictionary = {}
+var _shape_pet_stuck_time: Dictionary = {}
+var _shape_steering_active: Dictionary = {}   # true when WE set _move_locked
+
+# Lootworm retarget cooldown (maze/multiroom) — prevents path thrashing from gold_spawned
+var _lootworm_retarget_cooldown: Dictionary = {}
+const LOOTWORM_RETARGET_COOLDOWN := 0.5
+
 
 # Override init to handle shape-specific tile fill and visual setup.
 # Routes to different strategies based on shape type:
@@ -107,11 +116,11 @@ func init(zone: ZoneData) -> void:
 	var sid = shape.get_shape_id() if shape != null else ArenaShapeClass.SHAPE_RECTANGLE
 
 	# Shapes that use vanilla rectangular tiles
-	if shape == null or sid == ArenaShapeClass.SHAPE_RECTANGLE or shape.is_shrinking() or sid == ArenaShapeClass.SHAPE_HAZARD:
+	if shape == null or sid == ArenaShapeClass.SHAPE_RECTANGLE or shape.is_shrinking() or sid == ArenaShapeClass.SHAPE_HAZARD or sid == ArenaShapeClass.SHAPE_ROAMING_HAZARD:
 		.init(zone)
 		if shape != null and shape.is_shrinking():
 			_create_shrinking_outline()
-		if shape != null and sid == ArenaShapeClass.SHAPE_HAZARD:
+		if shape != null and (sid == ArenaShapeClass.SHAPE_HAZARD or sid == ArenaShapeClass.SHAPE_ROAMING_HAZARD):
 			_create_hazard_overlays(shape)
 		return
 
@@ -122,7 +131,19 @@ func init(zone: ZoneData) -> void:
 		_create_treadmill_scroll(shape)
 		return
 
-	# Maze and MultiRoom: vanilla init then draw solid walls + navigation
+	# Meteor: normal tiles + a pool of telegraph/impact overlays
+	if sid == ArenaShapeClass.SHAPE_METEOR:
+		.init(zone)
+		_create_meteor_pool(shape)
+		return
+
+	# Safe Zone: normal tiles + inverted fog + safe-circle outline
+	if sid == ArenaShapeClass.SHAPE_SAFE_ZONE:
+		.init(zone)
+		_create_safe_zone_visuals(shape)
+		return
+
+	# Maze, MultiRoom: vanilla rect tiles then draw solid walls + navigation
 	if sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM:
 		.init(zone)
 		_create_internal_wall_visuals(shape, zone)
@@ -171,6 +192,7 @@ func _physics_process(delta: float) -> void:
 		_update_shrinking_outline(shape)
 		_update_shrinking_fog(shape)
 		_apply_shrinking_damage(shape, delta)
+		_clamp_pets_to_shape(shape)
 		return
 
 	# Curse Run: treadmill drift + death wall
@@ -187,16 +209,417 @@ func _physics_process(delta: float) -> void:
 		_apply_scroller_damage(shape)
 		return
 
-	# Hazard: animate rings and damage players in hazard zones
-	if sid == ArenaShapeClass.SHAPE_HAZARD:
+	# Hazard / Roaming Hazard: move zones (roaming), animate rings, damage players
+	if sid == ArenaShapeClass.SHAPE_HAZARD or sid == ArenaShapeClass.SHAPE_ROAMING_HAZARD:
+		var timer = RunData.wave_timer
+		if timer != null and not timer.is_stopped() and timer.wait_time > 0:
+			var elapsed = timer.wait_time - timer.time_left
+			shape.update(elapsed / timer.wait_time)
 		_update_hazard_rings(shape, delta)
+		if timer == null or timer.is_stopped() or timer.wait_time <= 0:
+			return
 		_apply_hazard_damage(shape, delta)
 		return
 
-	# Maze/MultiRoom: steer enemies and pets along nav paths (only these shapes)
+	# Meteor: advance lifecycle, deal impact AoE, animate overlays
+	if sid == ArenaShapeClass.SHAPE_METEOR:
+		var timer = RunData.wave_timer
+		if timer == null or timer.is_stopped() or timer.wait_time <= 0:
+			return
+		var time_ratio = (timer.wait_time - timer.time_left) / timer.wait_time
+		var impacts = shape.tick(delta, time_ratio)
+		for imp in impacts:
+			_apply_meteor_impact(imp.center, imp.radius * METEOR_BLAST_MULT)
+		_update_meteor_visuals(shape, delta)
+		return
+
+	# Safe Zone: move the safe circle, redraw fog/outline, damage players outside it
+	if sid == ArenaShapeClass.SHAPE_SAFE_ZONE:
+		var timer = RunData.wave_timer
+		if timer != null and not timer.is_stopped() and timer.wait_time > 0:
+			var elapsed = timer.wait_time - timer.time_left
+			shape.update(elapsed / timer.wait_time)
+		_update_safe_zone_visuals(shape)
+		if timer == null or timer.is_stopped() or timer.wait_time <= 0:
+			return
+		_apply_safe_zone_damage(shape, delta)
+		return
+
+	# Circle/Hexagon: clamp out-of-bounds pets and steer around walls
+	if sid == ArenaShapeClass.SHAPE_CIRCLE or sid == ArenaShapeClass.SHAPE_HEXAGON:
+		_clamp_pets_to_shape(shape)
+		_steer_pets_around_walls(delta, shape)
+		return
+
+	# Maze/MultiRoom: steer enemies and pets along nav paths
 	if _astar != null and (sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM):
 		_steer_enemies_along_paths(delta, shape)
 		_steer_pets_along_paths(delta, shape)
+
+
+# Build the Meteor overlay pool — one reusable node-set per meteor slot, hidden
+# until its slot is active. Re-pointed each frame by _update_meteor_visuals.
+func _create_meteor_pool(shape) -> void:
+	_meteor_pool.clear()
+	var count = shape.get_slot_count()
+
+	var ember_grad = Gradient.new()
+	ember_grad.colors = PoolColorArray([
+		Color(1.0, 0.85, 0.4, 0.95),
+		Color(1.0, 0.45, 0.1, 0.85),
+		Color(0.6, 0.1, 0.0, 0.5),
+		Color(0.2, 0.0, 0.0, 0.0),
+	])
+	ember_grad.offsets = PoolRealArray([0.0, 0.3, 0.7, 1.0])
+
+	for _i in count:
+		var node = Node2D.new()
+		node.z_index = 4
+		node.visible = false
+		add_child(node)
+
+		var core = Polygon2D.new()
+		core.color = Color(1.0, 0.4, 0.1, 0.0)
+		node.add_child(core)
+
+		var ring = Line2D.new()
+		ring.width = 3.0
+		ring.default_color = Color(1.0, 0.3, 0.1, 0.8)
+		ring.antialiased = true
+		node.add_child(ring)
+
+		var reticle = Line2D.new()
+		reticle.width = 2.0
+		reticle.default_color = Color(1.0, 0.5, 0.15, 0.9)
+		reticle.antialiased = true
+		node.add_child(reticle)
+
+		# Falling rock — a dark jagged boulder that plummets onto the target during
+		# telegraph. Unit-sized polygon, scaled/positioned each frame.
+		var rock = Polygon2D.new()
+		var rock_pts = PoolVector2Array()
+		var rrng = RandomNumberGenerator.new()
+		rrng.seed = 0x5217 + _i
+		for k in 8:
+			var ra = TAU * k / 8.0
+			rock_pts.append(Vector2(cos(ra), sin(ra)) * rrng.randf_range(0.72, 1.0))
+		rock.polygon = rock_pts
+		rock.color = Color(0.16, 0.13, 0.12, 1.0)
+		rock.visible = false
+		node.add_child(rock)
+
+		# A smoke/fire trail that streams off the falling rock
+		var trail = CPUParticles2D.new()
+		trail.emitting = false
+		trail.amount = 24
+		trail.lifetime = 0.5
+		trail.speed_scale = 1.0
+		trail.randomness = 0.5
+		trail.direction = Vector2(0, -1)
+		trail.spread = 25.0
+		trail.gravity = Vector2(0, -40)
+		trail.initial_velocity = 30.0
+		trail.scale_amount = 4.0
+		trail.color_ramp = ember_grad
+		trail.emission_shape = CPUParticles2D.EMISSION_SHAPE_SPHERE
+		trail.emission_sphere_radius = 8.0
+		var tmat = CanvasItemMaterial.new()
+		tmat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+		trail.material = tmat
+		node.add_child(trail)
+
+		# Big explosion burst on impact
+		var embers = CPUParticles2D.new()
+		embers.emitting = false
+		embers.one_shot = true
+		embers.explosiveness = 0.95
+		embers.amount = 110
+		embers.lifetime = 0.9
+		embers.speed_scale = 1.6
+		embers.randomness = 0.7
+		embers.direction = Vector2(0, -1)
+		embers.spread = 180.0
+		embers.gravity = Vector2(0, -50)   # fire rises after bursting outward
+		embers.initial_velocity = 260.0
+		embers.initial_velocity_random = 0.8
+		embers.scale_amount = 7.0
+		embers.scale_amount_random = 0.7
+		embers.color_ramp = ember_grad
+		embers.emission_shape = CPUParticles2D.EMISSION_SHAPE_SPHERE
+		embers.emission_sphere_radius = 24.0
+		var mat = CanvasItemMaterial.new()
+		mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+		embers.material = mat
+		node.add_child(embers)
+
+		# Secondary smoke puff (darker, lingers) for a meatier blast
+		var smoke = CPUParticles2D.new()
+		smoke.emitting = false
+		smoke.one_shot = true
+		smoke.explosiveness = 0.9
+		smoke.amount = 40
+		smoke.lifetime = 1.1
+		smoke.randomness = 0.8
+		smoke.direction = Vector2(0, -1)
+		smoke.spread = 180.0
+		smoke.gravity = Vector2(0, -20)
+		smoke.initial_velocity = 120.0
+		smoke.initial_velocity_random = 0.9
+		smoke.scale_amount = 9.0
+		smoke.scale_amount_random = 0.6
+		var smoke_grad = Gradient.new()
+		smoke_grad.colors = PoolColorArray([
+			Color(0.3, 0.2, 0.15, 0.7),
+			Color(0.2, 0.15, 0.12, 0.4),
+			Color(0.1, 0.1, 0.1, 0.0),
+		])
+		smoke_grad.offsets = PoolRealArray([0.0, 0.5, 1.0])
+		smoke.color_ramp = smoke_grad
+		smoke.emission_shape = CPUParticles2D.EMISSION_SHAPE_SPHERE
+		smoke.emission_sphere_radius = 18.0
+		node.add_child(smoke)
+
+		_meteor_pool.append({
+			"node": node, "core": core, "ring": ring, "reticle": reticle,
+			"rock": rock, "trail": trail, "embers": embers, "smoke": smoke,
+			"last_state": 0
+		})
+
+
+# Origin-centered circle points (the parent node is positioned at the meteor).
+func _meteor_circle_points(radius: float, segs: int, closed: bool) -> PoolVector2Array:
+	var pts = PoolVector2Array()
+	for i in segs:
+		var a = TAU * i / float(segs)
+		pts.append(Vector2(cos(a), sin(a)) * radius)
+	if closed and segs > 0:
+		pts.append(pts[0])
+	return pts
+
+
+# Drive the overlay pool from the meteor shape's slot states each frame:
+#   TELEGRAPH -> pulsing warning ring + inward-shrinking reticle + faint shadow
+#   IMPACT    -> bright shockwave core + ember burst + screenshake (once)
+#   FADE      -> fading scorch
+func _update_meteor_visuals(shape, delta: float) -> void:
+	_meteor_time += delta
+	var meteors = shape.get_meteors()
+	for i in _meteor_pool.size():
+		var slot = _meteor_pool[i]
+		if i >= meteors.size() or not meteors[i].active:
+			slot.node.visible = false
+			slot.last_state = 0
+			continue
+
+		var m = meteors[i]
+		slot.node.visible = true
+		slot.node.global_position = m.center
+		var r = m.radius
+
+		match m.state:
+			METEOR_TELEGRAPH:
+				slot.core.polygon = _meteor_circle_points(r, 24, false)
+				slot.core.color = Color(0.5, 0.08, 0.0, 0.15 + 0.15 * m.progress)
+				slot.ring.visible = true
+				slot.ring.points = _meteor_circle_points(r, 32, true)
+				var pulse = 0.5 + 0.4 * sin(_meteor_time * 12.0)
+				slot.ring.default_color = Color(1.0, 0.3, 0.1, pulse)
+				slot.reticle.visible = true
+				slot.reticle.points = _meteor_circle_points(r * lerp(1.35, 0.12, m.progress), 24, true)
+				# Rock hangs high, then SLAMS down — ease-in so it's fastest at impact.
+				slot.rock.visible = true
+				var fall_h = 460.0
+				var fall_t = 1.0 - pow(m.progress, 3.0)  # stays high early, plummets near p->1
+				slot.rock.position = Vector2(0, -fall_h * fall_t)
+				var rock_scale = r * 0.5 * (0.55 + 0.45 * m.progress)
+				slot.rock.scale = Vector2(rock_scale, rock_scale)
+				slot.rock.rotation = _meteor_time * 7.0
+				if not slot.trail.emitting:
+					slot.trail.emitting = true
+				slot.trail.position = slot.rock.position
+			METEOR_IMPACT:
+				if slot.last_state != METEOR_IMPACT:
+					# Scale the burst with meteor size so big ones explode bigger
+					slot.embers.amount = int(clamp(r * 1.0, 60, 260))
+					slot.embers.emission_sphere_radius = r * 0.5
+					slot.embers.initial_velocity = clamp(160.0 + r * 1.2, 200.0, 460.0)
+					slot.embers.scale_amount = clamp(r * 0.06, 5.0, 13.0)
+					slot.smoke.amount = int(clamp(r * 0.4, 30, 120))
+					slot.smoke.emission_sphere_radius = r * 0.4
+					slot.smoke.scale_amount = clamp(r * 0.1, 8.0, 20.0)
+					slot.embers.restart()
+					slot.embers.emitting = true
+					slot.smoke.restart()
+					slot.smoke.emitting = true
+					slot.trail.emitting = false
+					var main = Utils.get_scene_node()
+					if main and main._screenshaker:
+						# Bigger meteors shake harder
+						main._screenshaker.shake(clamp(8.0 + r * 0.06, 8.0, 22.0), 0.4)
+				slot.rock.visible = false
+				slot.ring.visible = false
+				slot.reticle.visible = false
+				# Bright white-hot shockwave that expands out to the full blast radius
+				var grow = 1.1 + (METEOR_BLAST_MULT - 1.1) * (1.0 - m.timer / 0.18)
+				slot.core.polygon = _meteor_circle_points(r * grow, 28, false)
+				slot.core.color = Color(1.0, 0.9, 0.6, 0.9)
+			METEOR_FADE:
+				slot.rock.visible = false
+				slot.ring.visible = false
+				slot.reticle.visible = false
+				slot.core.polygon = _meteor_circle_points(r, 24, false)
+				slot.core.color = Color(0.7, 0.2, 0.05, 0.55 * m.progress)
+
+		slot.last_state = m.state
+
+
+# Deal a meteor's one-shot AoE damage to everything in radius: normal enemies
+# (big % of their max HP), bosses (a smaller %), and players (escalating hazard
+# damage). Uses Unit.take_damage for mobs so armor/flash/damage-numbers are free.
+func _apply_meteor_impact(center: Vector2, radius: float) -> void:
+	var main = Utils.get_scene_node()
+	if main == null:
+		return
+
+	var es = main._entity_spawner
+	if es != null:
+		if es.enemies != null:
+			for e in es.enemies:
+				if is_instance_valid(e) and not e.dead and e.global_position.distance_to(center) <= radius:
+					var dmg = int(max(1, e.max_stats.health * METEOR_DAMAGE_ENEMY_PCT))
+					e.take_damage(dmg, TakeDamageArgs.new(RunData.DUMMY_PLAYER_INDEX, null))
+		if es.bosses != null:
+			for b in es.bosses:
+				if is_instance_valid(b) and not b.dead and b.global_position.distance_to(center) <= radius:
+					var dmg = int(max(1, b.max_stats.health * METEOR_DAMAGE_BOSS_PCT))
+					b.take_damage(dmg, TakeDamageArgs.new(RunData.DUMMY_PLAYER_INDEX, null))
+
+	var players = main._players
+	if players != null:
+		for p in players:
+			if is_instance_valid(p) and not p.dead and not p.cleaning_up and p.global_position.distance_to(center) <= radius:
+				_deal_meteor_player_damage(p, main)
+
+
+# Heavy meteor hit for a player (percentage of max HP) with the usual feedback.
+func _deal_meteor_player_damage(player, main) -> void:
+	var damage = max(1, int(player.max_stats.health * METEOR_DAMAGE_PLAYER_PCT))
+	player.current_stats.health = max(0, player.current_stats.health - damage)
+	player.emit_signal("health_updated", player, player.current_stats.health, player.max_stats.health)
+	player.flash()
+	if main._floating_text_manager:
+		main._floating_text_manager.display(
+			"-" + str(damage),
+			player.global_position + Vector2(0, -40),
+			Color(ProgressData.settings.color_negative),
+			null, 0.7, true, Vector2(0, -60), false
+		)
+	if main._damage_vignette:
+		main._damage_vignette.update_from_hp(player.current_stats.health, player.max_stats.health)
+	if player.current_stats.health <= 0:
+		player.die()
+
+
+# Build the Safe Zone visuals: an inverted fog that darkens everything OUTSIDE
+# the safe circle, plus a dense ring of fire/spark emitters (same style as the
+# Closing Storm boundary) marking the dangerous edge — recolored red to match.
+func _create_safe_zone_visuals(_shape) -> void:
+	_safe_node = Node2D.new()
+	_safe_node.z_index = 15
+	add_child(_safe_node)
+
+	_safe_fog = Polygon2D.new()
+	_safe_fog.color = Color(0.5, 0.0, 0.05, 0.45)
+	_safe_fog.invert_enable = true
+	_safe_fog.invert_border = 3000.0
+	_safe_fog.z_index = 5
+	add_child(_safe_fog)
+
+	# Red fire/spark emitters ringing the boundary (mirrors the shrinking outline)
+	var fire_gradient = Gradient.new()
+	fire_gradient.colors = PoolColorArray([
+		Color(1.0, 0.25, 0.2, 0.9),
+		Color(0.8, 0.05, 0.05, 0.8),
+		Color(0.5, 0.0, 0.05, 0.6),
+		Color(0.2, 0.0, 0.0, 0.0),
+	])
+	fire_gradient.offsets = PoolRealArray([0.0, 0.3, 0.7, 1.0])
+
+	_safe_fire_emitters.clear()
+	for _i in SAFE_FIRE_COUNT:
+		var emitter = CPUParticles2D.new()
+		emitter.emitting = false
+		emitter.amount = 4
+		emitter.lifetime = 0.5
+		emitter.speed_scale = 1.5
+		emitter.randomness = 0.5
+		emitter.direction = Vector2(0, -1)
+		emitter.spread = 30.0
+		emitter.gravity = Vector2(0, -150)
+		emitter.initial_velocity = 40.0
+		emitter.initial_velocity_random = 0.5
+		emitter.scale_amount = 3.0
+		emitter.scale_amount_random = 0.5
+		emitter.color_ramp = fire_gradient
+		emitter.emission_shape = CPUParticles2D.EMISSION_SHAPE_SPHERE
+		emitter.emission_sphere_radius = 8.0
+		var mat = CanvasItemMaterial.new()
+		mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+		emitter.material = mat
+		_safe_node.add_child(emitter)
+		_safe_fire_emitters.append(emitter)
+
+
+# Redraw the safe circle's fog polygon and reposition the fire ring to follow
+# the roaming center.
+func _update_safe_zone_visuals(shape) -> void:
+	if _safe_fog == null:
+		return
+	var pts = PoolVector2Array()
+	for i in 48:
+		var a = TAU * i / 48.0
+		pts.append(shape.safe_center + Vector2(cos(a), sin(a)) * shape.safe_radius)
+	_safe_fog.polygon = pts
+
+	# Distribute the spark emitters evenly around the circle
+	for i in _safe_fire_emitters.size():
+		var a = TAU * i / float(SAFE_FIRE_COUNT)
+		_safe_fire_emitters[i].global_position = shape.safe_center + Vector2(cos(a), sin(a)) * shape.safe_radius
+		_safe_fire_emitters[i].emitting = true
+
+
+# Damage players OUTSIDE the safe circle: instant on entry to the danger area,
+# then escalating ticks (reuses the shrinking damage helper + cadence).
+func _apply_safe_zone_damage(shape, delta: float) -> void:
+	var main = Utils.get_scene_node()
+	if main == null:
+		return
+	var players = main._players
+	if players == null or players.empty():
+		return
+
+	for player in players:
+		if not is_instance_valid(player) or player.dead or player.cleaning_up:
+			continue
+		var pid = player.get_instance_id()
+		var outside = not shape.is_in_safe(player.global_position)
+		var was_outside = _safe_was_outside.get(pid, false)
+		if outside and not was_outside:
+			_deal_shrinking_damage(player, main)
+			_safe_damage_timers[pid] = 0.0
+		_safe_was_outside[pid] = outside
+
+	for player in players:
+		if not is_instance_valid(player) or player.dead or player.cleaning_up:
+			continue
+		var pid = player.get_instance_id()
+		if not _safe_was_outside.get(pid, false):
+			_safe_damage_timers.erase(pid)
+			continue
+		_safe_damage_timers[pid] = _safe_damage_timers.get(pid, 0.0) + delta
+		if _safe_damage_timers[pid] >= SHRINKING_DAMAGE_INTERVAL:
+			_safe_damage_timers[pid] = 0.0
+			_deal_shrinking_damage(player, main)
 
 
 # Create a Line2D visual outline for circle/hexagon shapes.
@@ -725,7 +1148,28 @@ const HAZARD_DAMAGE_ESCALATED := 0.30
 const HAZARD_ESCALATION_WINDOW := 2.0
 
 var _hazard_polys: Array = []
+var _hazard_emitters: Array = []   # parallel to zones; repositioned for roaming hazards
 var _hazard_time: float = 0.0
+
+# --- METEOR overlay pool (1:1 with meteor shape's fixed slots) ---
+var _meteor_pool: Array = []       # dicts {node, core, ring, reticle, embers, last_state}
+var _meteor_time: float = 0.0
+const METEOR_DAMAGE_ENEMY_PCT := 2.0   # > 1.0 = obliterates normal enemies in the blast
+const METEOR_DAMAGE_BOSS_PCT := 0.30   # bosses take a big chunk but survive
+const METEOR_DAMAGE_PLAYER_PCT := 0.50 # heavy hit for players caught in the blast
+const METEOR_BLAST_MULT := 1.4         # damage/blast radius vs. the telegraph marker
+# Mirror meteor_shape.gd's state constants (instance const access is unreliable)
+const METEOR_TELEGRAPH := 1
+const METEOR_IMPACT := 2
+const METEOR_FADE := 3
+
+# --- SAFE ZONE (roaming safe circle) visuals + damage ---
+var _safe_node: Node2D = null
+var _safe_fog: Polygon2D = null
+var _safe_fire_emitters: Array = []        # ring of spark emitters around the circle
+const SAFE_FIRE_COUNT := 120
+var _safe_was_outside: Dictionary = {}    # player id -> bool
+var _safe_damage_timers: Dictionary = {}  # player id -> float
 const HAZARD_MORPH_SEGMENTS := 48
 const HAZARD_MORPH_SPEED := 1.0
 const HAZARD_MORPH_AMOUNT := 0.15
@@ -858,13 +1302,26 @@ func _on_projectile_hit_wall(area: Area2D) -> void:
 func _create_hazard_overlays(shape) -> void:
 	var zones = shape.get_hazard_zones()
 
+	# Roaming Hazards use the same red as the Safe Zone; static Hazard Zones stay purple.
+	var is_roaming = shape.get_shape_id() == ArenaShapeClass.SHAPE_ROAMING_HAZARD
 	var fire_gradient = Gradient.new()
-	fire_gradient.colors = PoolColorArray([
-		Color(0.8, 0.2, 1.0, 0.9),   # bright purple
-		Color(0.6, 0.1, 0.9, 0.8),   # medium purple
-		Color(0.4, 0.0, 0.7, 0.6),   # dark purple
-		Color(0.2, 0.0, 0.3, 0.0),   # fade out
-	])
+	var poly_color
+	if is_roaming:
+		fire_gradient.colors = PoolColorArray([
+			Color(1.0, 0.25, 0.2, 0.9),   # bright red
+			Color(0.8, 0.05, 0.05, 0.8),  # medium red
+			Color(0.5, 0.0, 0.05, 0.6),   # dark red (Safe Zone tone)
+			Color(0.2, 0.0, 0.0, 0.0),    # fade out
+		])
+		poly_color = Color(0.6, 0.0, 0.05, 0.25)
+	else:
+		fire_gradient.colors = PoolColorArray([
+			Color(0.8, 0.2, 1.0, 0.9),   # bright purple
+			Color(0.6, 0.1, 0.9, 0.8),   # medium purple
+			Color(0.4, 0.0, 0.7, 0.6),   # dark purple
+			Color(0.2, 0.0, 0.3, 0.0),   # fade out
+		])
+		poly_color = Color(0.4, 0.0, 0.6, 0.25)
 	fire_gradient.offsets = PoolRealArray([0.0, 0.3, 0.7, 1.0])
 
 	for zone in zones:
@@ -875,7 +1332,7 @@ func _create_hazard_overlays(shape) -> void:
 			var angle = seg * TAU / float(HAZARD_MORPH_SEGMENTS)
 			points.append(zone.center + Vector2(cos(angle), sin(angle)) * zone.radius)
 		poly.polygon = points
-		poly.color = Color(0.4, 0.0, 0.6, 0.25)
+		poly.color = poly_color
 		poly.z_index = 2
 		add_child(poly)
 		_hazard_polys.append(poly)
@@ -905,6 +1362,7 @@ func _create_hazard_overlays(shape) -> void:
 		emitter.material = mat
 
 		add_child(emitter)
+		_hazard_emitters.append(emitter)
 
 
 # Animate hazard zone outlines with layered sine-wave morphing.
@@ -928,6 +1386,9 @@ func _update_hazard_rings(shape, delta: float) -> void:
 			var r = zone.radius * (1.0 + offset * HAZARD_MORPH_AMOUNT)
 			pts.append(zone.center + Vector2(cos(angle), sin(angle)) * r)
 		poly.polygon = pts
+		# Move the fire emitter to follow the zone (matters for roaming hazards)
+		if zi < _hazard_emitters.size():
+			_hazard_emitters[zi].global_position = zone.center
 
 
 # Deal percentage-based damage to a player inside a hazard zone.
@@ -981,7 +1442,7 @@ func _apply_hazard_damage(shape, delta: float) -> void:
 
 	# Entry detection (every frame) — instant damage on first touch
 	for player in players:
-		if not is_instance_valid(player) or player.dead:
+		if not is_instance_valid(player) or player.dead or player.cleaning_up:
 			continue
 		var pid = player.get_instance_id()
 		var current_zones = shape.get_hazard_zones_containing(player.global_position)
@@ -996,7 +1457,7 @@ func _apply_hazard_damage(shape, delta: float) -> void:
 
 	# Tick damage (every 0.5s per player) for players remaining inside zones
 	for player in players:
-		if not is_instance_valid(player) or player.dead:
+		if not is_instance_valid(player) or player.dead or player.cleaning_up:
 			continue
 		var pid = player.get_instance_id()
 		var current_zones = _player_hazard_zones.get(pid, [])
@@ -1202,6 +1663,7 @@ func _steer_pets_along_paths(delta: float, _shape) -> void:
 				_pet_stuck_time.erase(pid)
 				_pet_nav_locked.erase(pid)
 				_pet_last_target.erase(pid)
+				_lootworm_retarget_cooldown.erase(pid)
 
 	for pet in entity_spawner.pets:
 		if not is_instance_valid(pet) or pet.dead:
@@ -1215,11 +1677,17 @@ func _steer_pets_along_paths(delta: float, _shape) -> void:
 		if pet._move_locked and not _pet_nav_locked.get(pid, false):
 			continue
 
-		# Get the pet's current target
+		# Get the pet's current target.
+		# IMPORTANT: Pets have NO physical collision with internal walls (Layer 1
+		# vs pet mask Layers 8+10). The nav system is the ONLY thing keeping pets
+		# from walking through walls. Never release _move_locked unless the pet is
+		# within one tile of its target (safe for direct movement).
 		var target = pet.current_target
 		if target == null or not is_instance_valid(target) or not (target is Node2D):
-			pet._move_locked = false
-			_pet_nav_locked[pid] = false
+			# No target — keep locked, stop in place (don't release to straight-line)
+			pet._move_locked = true
+			pet._current_movement = Vector2.ZERO
+			_pet_nav_locked[pid] = true
 			continue
 
 		var target_pos = target.global_position
@@ -1228,22 +1696,69 @@ func _steer_pets_along_paths(delta: float, _shape) -> void:
 		var current_target_id = target.get_instance_id()
 		var last_target_id = _pet_last_target.get(pid, -1)
 		var target_changed = current_target_id != last_target_id
-		_pet_last_target[pid] = current_target_id
+
+		# Lootworm: suppress rapid retargeting from gold_spawned signals.
+		# Keep following current path for at least 0.5s before accepting new target.
+		if pet is Lootworm:
+			var cd = _lootworm_retarget_cooldown.get(pid, 0.0)
+			if target_changed and cd > 0.0 and _pet_paths.has(pid):
+				_pet_last_target[pid] = last_target_id
+				target_changed = false
+			elif target_changed:
+				_lootworm_retarget_cooldown[pid] = LOOTWORM_RETARGET_COOLDOWN
+				_pet_last_target[pid] = current_target_id
+			_lootworm_retarget_cooldown[pid] = max(0.0, _lootworm_retarget_cooldown.get(pid, 0.0) - delta)
+		else:
+			_pet_last_target[pid] = current_target_id
+
 		if target_changed:
 			_pet_paths.erase(pid)
+
+		# Helper: distance to target for safe-release checks
+		var dist_to_target = pet.global_position.distance_to(target_pos)
 
 		# Recalculate path
 		if should_update or not _pet_paths.has(pid):
 			var pet_point = _get_closest_astar_point(pet.global_position)
 			var target_point = _get_closest_astar_point(target_pos)
-			if pet_point == -1 or target_point == -1 or pet_point == target_point:
+
+			# Same tile as target — safe to release for direct movement
+			if pet_point != -1 and target_point != -1 and pet_point == target_point:
 				pet._move_locked = false
 				_pet_nav_locked[pid] = false
 				continue
+
+			# Invalid AStar point or no path possible — keep locked, stop
+			if pet_point == -1 or target_point == -1:
+				pet._move_locked = true
+				pet._current_movement = Vector2.ZERO
+				_pet_nav_locked[pid] = true
+				continue
+
 			var id_path = _astar.get_id_path(pet_point, target_point)
 			var point_path = PoolVector2Array()
 			for point_id in id_path:
 				point_path.append(_astar.get_point_position(point_id))
+
+			# Lootworm: if AStar path is >3x the Euclidean distance, gold is
+			# behind walls requiring a long detour. Reroute to player instead —
+			# gold near the player is reachable and the attraction area pulls it in.
+			if pet is Lootworm and point_path.size() > 2:
+				var euclidean_dist = pet.global_position.distance_to(target_pos)
+				if euclidean_dist > 50.0:
+					var path_length = 0.0
+					for pi in range(point_path.size() - 1):
+						path_length += point_path[pi].distance_to(point_path[pi + 1])
+					if path_length > euclidean_dist * 3.0:
+						var player_ref = main._players[pet.player_index] if pet.player_index >= 0 and pet.player_index < main._players.size() else null
+						if player_ref != null and is_instance_valid(player_ref) and not player_ref.dead:
+							var player_point = _get_closest_astar_point(player_ref.global_position)
+							if player_point != -1 and pet_point != player_point:
+								var player_id_path = _astar.get_id_path(pet_point, player_point)
+								point_path = PoolVector2Array()
+								for ppid in player_id_path:
+									point_path.append(_astar.get_point_position(ppid))
+
 			_pet_paths[pid] = point_path
 			# Find closest waypoint and start from the one after it
 			var best_idx = 0
@@ -1258,9 +1773,16 @@ func _steer_pets_along_paths(delta: float, _shape) -> void:
 		var path = _pet_paths.get(pid, PoolVector2Array())
 		var idx = _pet_path_idx.get(pid, 0)
 
+		# Path empty or exhausted — only release if close to target
 		if path.size() == 0 or idx >= path.size():
-			pet._move_locked = false
-			_pet_nav_locked[pid] = false
+			if dist_to_target < Utils.TILE_SIZE:
+				pet._move_locked = false
+				_pet_nav_locked[pid] = false
+			else:
+				pet._move_locked = true
+				pet._current_movement = Vector2.ZERO
+				_pet_nav_locked[pid] = true
+				_pet_paths.erase(pid)  # force recalc next frame
 			continue
 
 		# Advance past reached waypoints
@@ -1268,9 +1790,16 @@ func _steer_pets_along_paths(delta: float, _shape) -> void:
 			idx += 1
 		_pet_path_idx[pid] = idx
 
+		# All waypoints reached — only release if close to target
 		if idx >= path.size():
-			pet._move_locked = false
-			_pet_nav_locked[pid] = false
+			if dist_to_target < Utils.TILE_SIZE:
+				pet._move_locked = false
+				_pet_nav_locked[pid] = false
+			else:
+				pet._move_locked = true
+				pet._current_movement = Vector2.ZERO
+				_pet_nav_locked[pid] = true
+				_pet_paths.erase(pid)  # force recalc next frame
 			continue
 
 		# Follow the immediate next waypoint
@@ -1292,7 +1821,170 @@ func _steer_pets_along_paths(delta: float, _shape) -> void:
 
 		if _pet_stuck_time[pid] >= STUCK_THRESHOLD:
 			_pet_stuck_time[pid] = 0.0
-			var nudge_dir = (waypoint - pet.global_position).normalized()
-			pet.global_position += nudge_dir * 20.0
+			# Nudge toward nearest walkable tile (not toward waypoint which
+			# may be past a wall the pet can't physically collide with)
+			var nearest_pt = _get_closest_astar_point(pet.global_position)
+			if nearest_pt != -1:
+				var safe_pos = _astar.get_point_position(nearest_pt)
+				var nudge = safe_pos - pet.global_position
+				if nudge.length_squared() > 1.0:
+					pet.global_position += nudge.normalized() * 20.0
 			_pet_paths.erase(pid)
 			_pet_path_idx.erase(pid)
+
+
+# --- CIRCLE / HEXAGON / SHRINKING pet boundary enforcement ---
+
+# Per-frame position recovery: if a pet is outside the shape boundary (knocked past
+# collision walls or left behind by a shrinking boundary), teleport it to the nearest
+# valid point pulled 8px inward to avoid immediate re-collision with the wall.
+func _clamp_pets_to_shape(shape) -> void:
+	var main = Utils.get_scene_node()
+	if main == null:
+		return
+	var entity_spawner = main._entity_spawner
+	if entity_spawner == null:
+		return
+
+	for pet in entity_spawner.pets:
+		if not is_instance_valid(pet) or pet.dead:
+			continue
+		if pet._end_of_wave:
+			continue
+		if not shape.contains_point(pet.global_position):
+			var clamped = shape.clamp_position(pet.global_position)
+			var inward = (shape.center - clamped)
+			if inward.length_squared() > 0.01:
+				inward = inward.normalized() * 8.0
+			pet.global_position = clamped + inward
+
+
+# Wall avoidance steering for circle/hexagon shapes. Only activates when a
+# pet's 60px look-ahead crosses the shape boundary. Uses left/right probe
+# points to pick the best side to steer around, preventing vertex oscillation.
+# When the path is clear, normal FollowTargetMovementBehavior handles movement.
+func _steer_pets_around_walls(delta: float, shape) -> void:
+	var main = Utils.get_scene_node()
+	if main == null:
+		return
+	var entity_spawner = main._entity_spawner
+	if entity_spawner == null:
+		return
+
+	# Prune dead/freed pets from tracking dicts
+	for pid in _shape_pet_last_pos.keys():
+		if not _shape_steering_active.has(pid):
+			_shape_pet_last_pos.erase(pid)
+			_shape_pet_stuck_time.erase(pid)
+
+	for pet in entity_spawner.pets:
+		if not is_instance_valid(pet) or pet.dead:
+			continue
+		if pet._end_of_wave:
+			continue
+
+		var pid = pet.get_instance_id()
+
+		# Release steering lock for pets that can't move (e.g. CatlingGun mad mode)
+		if not pet._can_move:
+			if _shape_steering_active.get(pid, false):
+				pet._move_locked = false
+				_shape_steering_active.erase(pid)
+			continue
+
+		# Respect existing _move_locked set by others (e.g. BonkDog jump)
+		if pet._move_locked and not _shape_steering_active.get(pid, false):
+			continue
+
+		var target = pet.current_target
+		if target == null or not is_instance_valid(target):
+			if _shape_steering_active.get(pid, false):
+				pet._move_locked = false
+				_shape_steering_active.erase(pid)
+			continue
+
+		var pet_pos = pet.global_position
+		var target_pos = target.global_position
+		var dir = target_pos - pet_pos
+		var dir_len_sq = dir.length_squared()
+		if dir_len_sq < 100.0:  # within 10px, no steering needed
+			if _shape_steering_active.get(pid, false):
+				pet._move_locked = false
+				_shape_steering_active.erase(pid)
+			continue
+
+		var dir_norm = dir.normalized()
+
+		# Only steer when the direct path hits the shape boundary.
+		# Check a point 60px ahead — if it's inside the shape, the path is clear.
+		var look_ahead = pet_pos + dir_norm * 60.0
+		var path_clear = shape.contains_point(look_ahead)
+
+		# Lootworm: also check midpoints along the full path to target.
+		# Prevents oscillation where the 60px look-ahead clears but gold is
+		# still across the wall (Lootworm turns back, hits wall, repeats).
+		if path_clear and pet is Lootworm:
+			if not shape.contains_point(target_pos):
+				path_clear = false
+			else:
+				var sample_dist = min(dir.length(), 300.0)
+				var mid1 = pet_pos + dir_norm * (sample_dist * 0.33)
+				var mid2 = pet_pos + dir_norm * (sample_dist * 0.66)
+				if not shape.contains_point(mid1) or not shape.contains_point(mid2):
+					path_clear = false
+
+		if path_clear:
+			# Clear path — release steering lock, let normal behavior work
+			if _shape_steering_active.get(pid, false):
+				pet._move_locked = false
+				_shape_steering_active.erase(pid)
+			continue
+
+		# Wall ahead: use left/right probes to pick which side to steer around.
+		# This prevents oscillation at hexagon vertices where two edges meet.
+		var perp = Vector2(-dir_norm.y, dir_norm.x)
+		var probe_dist = 40.0
+		var probe_left = pet_pos + (dir_norm + perp).normalized() * probe_dist
+		var probe_right = pet_pos + (dir_norm - perp).normalized() * probe_dist
+		var left_ok = shape.contains_point(probe_left)
+		var right_ok = shape.contains_point(probe_right)
+
+		var steered: Vector2
+		if left_ok and not right_ok:
+			steered = (dir_norm + perp * 0.8).normalized()
+		elif right_ok and not left_ok:
+			steered = (dir_norm - perp * 0.8).normalized()
+		elif left_ok and right_ok:
+			# Both sides clear but straight blocked — pick side closer to target
+			if perp.dot(dir) >= 0:
+				steered = (dir_norm + perp * 0.6).normalized()
+			else:
+				steered = (dir_norm - perp * 0.6).normalized()
+		else:
+			# Both sides blocked — pull toward center to escape corner
+			steered = (shape.center - pet_pos).normalized()
+
+		# Small inward pull to prevent drifting along the wall indefinitely
+		var inward = (shape.center - pet_pos).normalized()
+		steered = (steered + inward * 0.2).normalized()
+
+		pet._move_locked = true
+		pet._current_movement = steered * dir.length()
+		_shape_steering_active[pid] = true
+
+		# --- Anti-stuck detection (same pattern as maze nav) ---
+		var last_pos = _shape_pet_last_pos.get(pid, pet_pos)
+		var moved = pet_pos.distance_to(last_pos)
+		_shape_pet_last_pos[pid] = pet_pos
+
+		if moved < STUCK_MOVE_MIN:
+			_shape_pet_stuck_time[pid] = _shape_pet_stuck_time.get(pid, 0.0) + delta
+		else:
+			_shape_pet_stuck_time[pid] = 0.0
+
+		if _shape_pet_stuck_time[pid] >= STUCK_THRESHOLD:
+			_shape_pet_stuck_time[pid] = 0.0
+			# Teleport 30px toward center to break free
+			pet.global_position += inward * 30.0
+			pet._move_locked = false
+			_shape_steering_active.erase(pid)

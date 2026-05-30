@@ -25,10 +25,11 @@ func init(zone: ZoneData) -> void:
 	var shape = ZoneService.arena_shape
 	var sid = shape.get_shape_id() if shape != null else ArenaShapeClass.SHAPE_RECTANGLE
 
-	# Default, Shrinking, Hazard, Maze, MultiRoom use vanilla outer walls
-	if shape == null or sid == ArenaShapeClass.SHAPE_RECTANGLE or shape.is_shrinking() or sid == ArenaShapeClass.SHAPE_HAZARD or sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM or sid == ArenaShapeClass.SHAPE_CURSE_RUN:
+	# Default, Shrinking, Hazard(+Roaming), Maze, MultiRoom, Curse Run, Meteor,
+	# Safe Zone use vanilla rectangular outer walls
+	if shape == null or sid == ArenaShapeClass.SHAPE_RECTANGLE or shape.is_shrinking() or sid == ArenaShapeClass.SHAPE_HAZARD or sid == ArenaShapeClass.SHAPE_ROAMING_HAZARD or sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM or sid == ArenaShapeClass.SHAPE_CURSE_RUN or sid == ArenaShapeClass.SHAPE_METEOR or sid == ArenaShapeClass.SHAPE_SAFE_ZONE:
 		.init(zone)
-		# Maze and MultiRoom also need internal walls
+		# Maze, MultiRoom also need internal walls
 		if shape != null and (sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM):
 			_create_internal_walls(shape)
 		return

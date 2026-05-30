@@ -18,21 +18,19 @@ var arena_shape_id = 0                # currently selected shape (0-8, 8 = rando
 var arena_shape = null                # active ArenaShape instance (null = vanilla rectangle)
 var arena_shrinking_min_scale = 0.4   # configurable via manifest
 var arena_shrinking_speed = 1.0       # configurable via manifest
-var _resolved_shape_id = 0            # per-wave resolved shape (random picks 1-7 each wave)
+var arena_meteor_interval = 1.6       # configurable via manifest — seconds between meteors
+var arena_meteor_max_active = 3       # configurable via manifest — max telegraphing at once
+var arena_random_pool = [0, 1, 2, 3, 4, 5, 6, 7]  # shape ids eligible when Random is selected
+var arena_random_per_run = true       # true = roll once per run; false = re-roll each wave
+var _resolved_shape_id = 0            # resolved concrete shape for this wave
 
 
 # Override set_current_zone to inject shape setup after the parent resolves
 # zone dimensions. Hexagon gets a 30% size boost because a hexagon inscribed
 # in a rectangle only covers ~87% of the area — the boost compensates.
 func set_current_zone(p_current_zone: ZoneData) -> void:
-	# Resolve shape ID for this wave (random picks a concrete shape each wave)
-	_resolved_shape_id = 0
-	if ProgressData.settings.has("arena_shape_selected"):
-		var shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, 8))
-		if shape_id == ArenaShapeClass.SHAPE_RANDOM:
-			_resolved_shape_id = randi() % 8
-		else:
-			_resolved_shape_id = shape_id
+	# Resolve shape ID for this wave (handles random pool filtering + reroll mode)
+	_resolved_shape_id = _resolve_shape_id()
 
 	if _resolved_shape_id == ArenaShapeClass.SHAPE_HEXAGON:
 		var boost = 1.3
@@ -49,19 +47,84 @@ func set_current_zone(p_current_zone: ZoneData) -> void:
 func _setup_arena_shape() -> void:
 	# Restore selection from ProgressData (persists across save/resume)
 	if ProgressData.settings.has("arena_shape_selected"):
-		arena_shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, 8))
+		arena_shape_id = int(clamp(ProgressData.settings.arena_shape_selected, 0, ArenaShapeClass.SHAPE_RANDOM))
 
 	# Use the resolved ID (handles random → concrete shape per wave)
 	var shape = ArenaShapeClass.create_shape(_resolved_shape_id)
 
 	if shape != null:
-		shape.setup(current_zone_max_position.x, current_zone_max_position.y)
-
+		# Apply config BEFORE setup() — meteor_shape.setup() sizes its slot pool
+		# from meteor_max_active, so these must be set first.
 		if shape.is_shrinking():
 			shape.min_scale = arena_shrinking_min_scale
 			shape.shrink_speed = arena_shrinking_speed
+		if _resolved_shape_id == ArenaShapeClass.SHAPE_METEOR:
+			shape.meteor_interval = arena_meteor_interval
+			shape.meteor_max_active = arena_meteor_max_active
+
+		shape.setup(current_zone_max_position.x, current_zone_max_position.y)
 
 	arena_shape = shape
+
+
+# Resolve the concrete shape id (0-7) to use for this wave.
+#   - A non-random selection returns itself directly.
+#   - Random + per-wave  → fresh pick from the enabled pool each wave.
+#   - Random + per-run   → pick once at run start, cache in ProgressData so it
+#                          stays fixed across waves and survives save/resume.
+func _resolve_shape_id() -> int:
+	var selected = 0
+	if ProgressData.settings.has("arena_shape_selected"):
+		selected = int(clamp(ProgressData.settings.arena_shape_selected, 0, ArenaShapeClass.SHAPE_RANDOM))
+
+	if selected != ArenaShapeClass.SHAPE_RANDOM:
+		return selected
+
+	# --- Random selected ---
+	var pool = _get_random_pool()  # always non-empty
+
+	var per_run = arena_random_per_run
+	if ProgressData.settings.has("arena_random_per_run"):
+		per_run = bool(ProgressData.settings.arena_random_per_run)
+
+	if not per_run:
+		# Per-wave: fresh pick every wave, filtered to the enabled pool.
+		return pool[randi() % pool.size()]
+
+	# Per-run: roll once and cache. Re-roll at run start (wave 1) or when no
+	# valid cache exists; otherwise reuse the cached shape.
+	var current_wave = 1
+	if RunData and RunData.current_wave != null:
+		current_wave = int(RunData.current_wave)
+
+	var has_cache = ProgressData.settings.has("arena_random_run_resolved") \
+		and int(ProgressData.settings.arena_random_run_resolved) >= 0
+	var cached = -1
+	if has_cache:
+		cached = int(ProgressData.settings.arena_random_run_resolved)
+
+	# Reuse a still-valid cache on later waves.
+	if has_cache and current_wave > 1 and pool.has(cached):
+		return cached
+
+	var rolled = pool[randi() % pool.size()]
+	ProgressData.settings["arena_random_run_resolved"] = rolled
+	return rolled
+
+
+# Return the random pool from ProgressData, filtered to valid concrete ids.
+# Falls back to the default pool when missing (old saves) or empty (user
+# unchecked everything) so Random never gets stuck with nothing to pick.
+func _get_random_pool() -> Array:
+	var pool = []
+	if ProgressData.settings.has("arena_random_pool"):
+		for v in ProgressData.settings.arena_random_pool:
+			var id = int(v)
+			if id >= 0 and id < ArenaShapeClass.SHAPE_CONCRETE_COUNT and not pool.has(id):
+				pool.append(id)
+	if pool.empty():
+		pool = ArenaShapeClass.RANDOM_POOL_DEFAULT.duplicate()
+	return pool
 
 
 # Override: delegate random position generation to the arena shape.

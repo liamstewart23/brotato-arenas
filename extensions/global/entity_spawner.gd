@@ -18,7 +18,7 @@ func get_spawn_pos_in_area(base_pos: Vector2, area: int, spawn_dist_from_edges: 
 
 	# Shapes that use vanilla rectangular spawning logic
 	var sid = shape.get_shape_id() if shape != null else ArenaShapeClass.SHAPE_RECTANGLE
-	if shape == null or sid == ArenaShapeClass.SHAPE_RECTANGLE or (shape.is_shrinking() and sid != ArenaShapeClass.SHAPE_CURSE_RUN) or sid == ArenaShapeClass.SHAPE_HAZARD:
+	if shape == null or sid == ArenaShapeClass.SHAPE_RECTANGLE or (shape.is_shrinking() and sid != ArenaShapeClass.SHAPE_CURSE_RUN) or sid == ArenaShapeClass.SHAPE_HAZARD or sid == ArenaShapeClass.SHAPE_ROAMING_HAZARD or sid == ArenaShapeClass.SHAPE_METEOR or sid == ArenaShapeClass.SHAPE_SAFE_ZONE:
 		return .get_spawn_pos_in_area(base_pos, area, spawn_dist_from_edges, spawn_edge_of_map)
 
 	# Curse Run: ALL enemies spawn from the right edge
@@ -26,6 +26,15 @@ func get_spawn_pos_in_area(base_pos: Vector2, area: int, spawn_dist_from_edges: 
 		return shape.get_rand_edge_pos(float(Utils.EDGE_MAP_DIST))
 
 	var d = spawn_dist_from_edges
+
+	# Maze/MultiRoom: always use get_rand_pos for walkable tile centers.
+	# The get_rand_pos_in_area path can place entities in or overlapping wall
+	# tiles because clamp_position is a no-op for these shapes and contains_point
+	# only checks the exact tile (no sprite clearance from adjacent walls).
+	if sid == ArenaShapeClass.SHAPE_MAZE or sid == ArenaShapeClass.SHAPE_MULTIROOM:
+		if spawn_edge_of_map:
+			return shape.get_rand_edge_pos(float(Utils.EDGE_MAP_DIST))
+		return shape.get_rand_pos(float(d))
 
 	if spawn_edge_of_map:
 		return shape.get_rand_edge_pos(float(Utils.EDGE_MAP_DIST))

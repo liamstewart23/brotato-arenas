@@ -22,7 +22,15 @@ const SHAPE_SHRINKING = 4
 const SHAPE_MAZE = 5
 const SHAPE_MULTIROOM = 6
 const SHAPE_HAZARD = 7
-const SHAPE_RANDOM = 8
+const SHAPE_ROAMING_HAZARD = 8
+const SHAPE_METEOR = 9
+const SHAPE_SAFE_ZONE = 10
+const SHAPE_RANDOM = 11
+
+# Random pool defaults — shared by zone_service (resolver), run_options_panel (UI)
+# and mod_main (config seeding) so there's one source of truth.
+const SHAPE_CONCRETE_COUNT = 11                            # ids 0..10 are concrete; 11 = Random
+const RANDOM_POOL_DEFAULT = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # all concrete shapes enabled
 
 # Arena dimensions in pixels, set by setup()
 var center := Vector2.ZERO
@@ -146,6 +154,12 @@ static func create_shape(shape_id: int):
 			shape_script = load(base_path + "multiroom_shape.gd")
 		SHAPE_HAZARD:
 			shape_script = load(base_path + "hazard_shape.gd")
+		SHAPE_ROAMING_HAZARD:
+			shape_script = load(base_path + "roaming_hazard_shape.gd")
+		SHAPE_METEOR:
+			shape_script = load(base_path + "meteor_shape.gd")
+		SHAPE_SAFE_ZONE:
+			shape_script = load(base_path + "safe_zone_shape.gd")
 		_:
 			return null
 	return shape_script.new()

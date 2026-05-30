@@ -11,11 +11,19 @@
 
 extends "res://ui/menus/run/run_options_panel.gd"
 
+const ArenaShapeClass = preload("res://mods-unpacked/PapiLeem-Arenas/arena_shapes/arena_shape.gd")
+const ArenaRandomPopup = preload("res://mods-unpacked/PapiLeem-Arenas/ui/arena_random_popup.gd")
+
 var _arena_shape_option: OptionButton
 var _arena_desc_label: Label
 
+# Random settings: a trigger button (shown only when "Random" is selected) that opens
+# a modal popup holding the pool checkboxes + reroll toggle.
+var _random_settings_button: Button
+var _random_popup
+
 # Translation keys — indices match ArenaShapeClass.SHAPE_* constants
-const SHAPE_NAMES = ["ARENA_RECTANGLE", "ARENA_CIRCLE", "ARENA_HEXAGON", "ARENA_CURSE_RUN", "ARENA_SHRINKING", "ARENA_MAZE", "ARENA_MULTIROOM", "ARENA_HAZARD", "ARENA_RANDOM"]
+const SHAPE_NAMES = ["ARENA_RECTANGLE", "ARENA_CIRCLE", "ARENA_HEXAGON", "ARENA_CURSE_RUN", "ARENA_SHRINKING", "ARENA_MAZE", "ARENA_MULTIROOM", "ARENA_HAZARD", "ARENA_ROAMING_HAZARD", "ARENA_METEOR", "ARENA_SAFE_ZONE", "ARENA_RANDOM"]
 
 # English fallback descriptions (used when tr() returns the key unchanged)
 const SHAPE_DESCS_EN = [
@@ -27,6 +35,9 @@ const SHAPE_DESCS_EN = [
 	"Procedural maze - different layout every wave",
 	"Rooms connected by doorways",
 	"Curse clouds that damage you on contact",
+	"Roaming curse clouds drift around the arena",
+	"Meteors rain down - get off the marked spot",
+	"Stay in the moving safe zone or take damage",
 	"Random arena shape each wave",
 ]
 
@@ -58,6 +69,12 @@ func _setup_arena_shape():
 	ZoneService.arena_shape_id = saved
 	_arena_shape_option.selected = saved
 
+	# Restore random-pool settings into ZoneService (persists across save/resume)
+	if ProgressData.settings.has("arena_random_pool"):
+		ZoneService.arena_random_pool = ProgressData.settings.arena_random_pool.duplicate()
+	if ProgressData.settings.has("arena_random_per_run"):
+		ZoneService.arena_random_per_run = bool(ProgressData.settings.arena_random_per_run)
+
 	# Connect after setting selected
 	_arena_shape_option.connect("item_selected", self, "_on_arena_shape_selected")
 
@@ -76,6 +93,10 @@ func _setup_arena_shape():
 	buttons_vbox.add_child_below_node(_arena_shape_option, _arena_desc_label)
 	_update_desc_label()
 
+	# "Random Settings" trigger button (visible only when Random is selected)
+	_setup_random_settings_button(buttons_vbox)
+	_update_random_ui_visibility()
+
 
 # Callback when the player selects a shape from the dropdown.
 # Persists the selection in ProgressData so zone_service.gd can read it.
@@ -83,6 +104,48 @@ func _on_arena_shape_selected(index: int):
 	ZoneService.arena_shape_id = index
 	ProgressData.settings["arena_shape_selected"] = index
 	_update_desc_label()
+	_update_random_ui_visibility()
+
+
+# Build the compact "Random Settings" button that opens the pool/reroll popup.
+# Inserted below the description label; visibility is driven by the dropdown.
+func _setup_random_settings_button(buttons_vbox):
+	var small_font = load("res://resources/fonts/actual/base/font_smallest_text.tres")
+
+	_random_settings_button = Button.new()
+	_random_settings_button.name = "ArenaRandomSettingsButton"
+	if small_font:
+		_random_settings_button.add_font_override("font", small_font)
+	var t = tr("ARENA_RANDOM_SETTINGS")
+	_random_settings_button.text = ("Random Settings" if t == "ARENA_RANDOM_SETTINGS" else t)
+	_random_settings_button.connect("pressed", self, "_on_random_settings_pressed")
+	buttons_vbox.add_child_below_node(_arena_desc_label, _random_settings_button)
+
+
+# Lazily build the popup, then open it.
+func _on_random_settings_pressed():
+	if _random_popup == null:
+		_random_popup = ArenaRandomPopup.new()
+		_random_popup.setup(SHAPE_NAMES)
+	_random_popup.open()
+
+
+# The popup's CanvasLayer is parented to the scene root, so free it explicitly when
+# this panel leaves the tree (e.g. leaving the character selection screen).
+func _exit_tree():
+	if _random_popup != null and is_instance_valid(_random_popup):
+		_random_popup.destroy()
+		_random_popup = null
+
+
+# Show the settings button only when "Random" is the selected shape; close the popup
+# if the selection moves away from Random while it's open.
+func _update_random_ui_visibility():
+	var is_random = (_arena_shape_option.selected == ArenaShapeClass.SHAPE_RANDOM)
+	if _random_settings_button:
+		_random_settings_button.visible = is_random
+	if not is_random and _random_popup != null and _random_popup.is_open():
+		_random_popup.close()
 
 
 # Derive the description translation key from the shape name key.

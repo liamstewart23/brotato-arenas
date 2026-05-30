@@ -1,8 +1,8 @@
 {
 	"name": "Arenas",
 	"namespace": "PapiLeem",
-	"version_number": "2.0.0",
-	"description": "Choose from 8 arena shapes per run: Default, Circle, Hexagon, Curse Run (treadmill), Closing Storm (battle royale), Maze, Caves, or Hazard Zones.",
+	"version_number": "2.2.0",
+	"description": "Choose from 12 arena shapes per run: Default, Circle, Hexagon, Curse Run (treadmill), Closing Storm (battle royale), Maze, Caves, Hazard Zones, Roaming Hazards, Meteor Shower, Safe Zone, or Random (different shape each wave).",
 	"website_url": "",
 	"dependencies": [],
 	"extra": {
@@ -20,10 +20,10 @@
 					"default_arena_shape": {
 						"type": "integer",
 						"title": "Default Arena Shape",
-						"description": "0=Default, 1=Circle, 2=Hexagon, 3=Curse Run, 4=Closing Storm, 5=Maze, 6=Caves, 7=Hazard Zones",
+						"description": "0=Default, 1=Circle, 2=Hexagon, 3=Curse Run, 4=Closing Storm, 5=Maze, 6=Caves, 7=Hazard Zones, 8=Roaming Hazards, 9=Meteor Shower, 10=Safe Zone, 11=Random",
 						"default": 0,
 						"minimum": 0,
-						"maximum": 7
+						"maximum": 11
 					},
 					"shrinking_min_scale": {
 						"type": "number",
@@ -40,6 +40,28 @@
 						"default": 1.0,
 						"minimum": 0.5,
 						"maximum": 3.0
+					},
+					"meteor_interval": {
+						"type": "number",
+						"title": "Meteor Shower: Interval",
+						"description": "Seconds between meteor strikes (lower = more frequent)",
+						"default": 1.6,
+						"minimum": 0.5,
+						"maximum": 5.0
+					},
+					"meteor_max_active": {
+						"type": "integer",
+						"title": "Meteor Shower: Max Active",
+						"description": "How many meteors can be telegraphing at once",
+						"default": 3,
+						"minimum": 1,
+						"maximum": 8
+					},
+					"default_random_per_run": {
+						"type": "boolean",
+						"title": "Random: Re-roll Mode",
+						"description": "false = new random shape each wave; true = one random shape per run",
+						"default": true
 					}
 				}
 			}
