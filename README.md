@@ -1,4 +1,4 @@
-<img width="500" height="500" alt="arenas_logo_mod" src="https://github.com/user-attachments/assets/92571d54-9a64-4b8a-8a32-bd6cab83e63e" />
+<img width="250" height="250" alt="arenas_logo_mod" src="https://github.com/user-attachments/assets/92571d54-9a64-4b8a-8a32-bd6cab83e63e" />
 
 # Brotato - Arenas Mod
 
